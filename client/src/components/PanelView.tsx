@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
 import type { AppData, Connection, LogEntry, PanelState } from '../types';
 import { ConnectionForm } from './ConnectionForm';
+import { ConnectionList } from './ConnectionList';
 import { ConnectionPanel } from './ConnectionPanel';
-import { Icon } from './Icon';
 import { LogView } from './LogView';
 import { TotpDialog } from './TotpDialog';
 
@@ -17,38 +17,22 @@ interface PanelViewProps {
 
 type Dialog = { kind: 'connection'; connection: Connection | null } | { kind: 'totp'; connection: Connection };
 
-const selectedKey = 'wsl-vpn:selected';
-
-function rememberedSelection(): string | null {
-  try {
-    return localStorage.getItem(selectedKey);
-  } catch {
-    return null;
-  }
-}
-
+/** Screen 1 (list) and screen 2 (one connection), with the activity log beside them. */
 export function PanelView({ data, state, log, onChanged, onNotify }: PanelViewProps) {
-  const [selectedId, setSelectedId] = useState<string | null>(rememberedSelection);
+  const [openId, setOpenId] = useState<string | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const { connections, vaultReady } = data;
   const { status } = state;
   const notifyError = (message: string) => onNotify('error', message);
 
   const active = connections.find((c) => c.id === status.activeId && status.up);
-  const selected = connections.find((c) => c.id === selectedId) ?? active ?? connections[0] ?? null;
-
-  useEffect(() => {
-    try {
-      if (selected) localStorage.setItem(selectedKey, selected.id);
-    } catch {
-      // Storage unavailable: the selection just isn't remembered.
-    }
-  }, [selected?.id]);
+  const open = connections.find((c) => c.id === openId) ?? null;
 
   async function remove(connection: Connection) {
     if (!confirm(`Excluir "${connection.name}"? A senha e o autenticador dela no cofre também são apagados.`)) return;
     try {
       await api.deleteConnection(connection.id);
+      setOpenId(null);
       onNotify('ok', `"${connection.name}" excluída`);
       onChanged();
     } catch (error) {
@@ -56,77 +40,33 @@ export function PanelView({ data, state, log, onChanged, onNotify }: PanelViewPr
     }
   }
 
-  const newConnection = () => setDialog({ kind: 'connection', connection: null });
-
   return (
     <div className="panel-layout">
-      <aside className="sidebar">
-        <section className="card list-card">
-          <header className="list-head">
-            <span className="eyebrow">
-              <Icon name="shield" size={13} /> Conexões
-            </span>
-            <button className="button small primary" onClick={newConnection}>
-              <Icon name="plus" />
-              Nova conexão
-            </button>
-          </header>
-          {connections.length === 0 ? (
-            <p className="list-empty muted small">Nenhuma conexão ainda.</p>
-          ) : (
-            <ul className="list">
-              {connections.map((connection) => {
-                const isUp = status.up && status.activeId === connection.id;
-                return (
-                  <li key={connection.id}>
-                    <button
-                      className={`list-item${selected?.id === connection.id ? ' is-selected' : ''}`}
-                      onClick={() => setSelectedId(connection.id)}
-                    >
-                      <span className={`dot small-dot ${isUp ? 'up' : 'idle'}`} />
-                      <span className="list-text">
-                        <strong>{connection.name}</strong>
-                        <span className="muted small">{connection.host}</span>
-                      </span>
-                      {connection.tunnel.enabled && (
-                        <span title="Com túnel para o Windows">
-                          <Icon name="globe" size={14} />
-                        </span>
-                      )}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
-      </aside>
-
       <div className="panel-main">
-        {selected ? (
+        {open ? (
           <ConnectionPanel
-            connection={selected}
-            otherActive={active && active.id !== selected.id ? active.name : null}
+            connection={open}
+            otherActive={active && active.id !== open.id ? active.name : null}
             state={state}
             vaultReady={vaultReady}
-            onEdit={() => setDialog({ kind: 'connection', connection: selected })}
-            onDelete={() => remove(selected)}
-            onManageTotp={() => setDialog({ kind: 'totp', connection: selected })}
+            onBack={() => setOpenId(null)}
+            onEdit={() => setDialog({ kind: 'connection', connection: open })}
+            onDelete={() => remove(open)}
+            onManageTotp={() => setDialog({ kind: 'totp', connection: open })}
             onError={notifyError}
           />
         ) : (
-          <section className="card empty-state">
-            <Icon name="shield" size={32} />
-            <h2>Crie sua primeira conexão</h2>
-            <p className="muted">Gateway, usuário, senha e, se quiser, o túnel para o Windows usar a VPN.</p>
-            <button className="button primary" onClick={newConnection}>
-              <Icon name="plus" />
-              Nova conexão
-            </button>
-          </section>
+          <ConnectionList
+            connections={connections}
+            state={state}
+            onOpen={(connection) => setOpenId(connection.id)}
+            onNew={() => setDialog({ kind: 'connection', connection: null })}
+            onError={notifyError}
+          />
         )}
-        <LogView entries={log} />
       </div>
+
+      <LogView entries={log} />
 
       {dialog?.kind === 'connection' && (
         <ConnectionForm
@@ -135,7 +75,7 @@ export function PanelView({ data, state, log, onChanged, onNotify }: PanelViewPr
           onClose={() => setDialog(null)}
           onSaved={(connection) => {
             setDialog(null);
-            setSelectedId(connection.id);
+            setOpenId(connection.id);
             onNotify('ok', `Conexão "${connection.name}" salva`);
             onChanged();
           }}

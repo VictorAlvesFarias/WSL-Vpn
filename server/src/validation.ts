@@ -1,4 +1,4 @@
-import type { Connection, Settings, Tunnel } from './store.ts';
+import { tunnelModes, type Connection, type Settings, type Tunnel, type TunnelMode } from './store.ts';
 
 export class HttpError extends Error {
   status: number;
@@ -73,20 +73,18 @@ export function parseTarget(input: string): string {
   return domain ? `*.${name}` : name;
 }
 
-function parseTunnel(raw: unknown): Tunnel {
-  const body = (raw && typeof raw === 'object' ? raw : {}) as Body;
+/** The tunnel is edited on the connection screen; an empty target list is fine while building it. */
+export function parseTunnel(body: Body): Tunnel {
+  if (!tunnelModes.includes(body.mode as TunnelMode)) throw badRequest('Modo do túnel inválido');
   const rawTargets = Array.isArray(body.targets) ? body.targets : [];
   if (rawTargets.some((item) => typeof item !== 'string')) throw badRequest('Destinos do túnel inválidos');
   const targets = [...new Set((rawTargets as string[]).filter((item) => item.trim()).map(parseTarget))];
   if (targets.length > 200) throw badRequest('Destinos demais (máximo 200)');
-  const tunnel: Tunnel = { enabled: body.enabled === true, global: body.global === true, m365: body.m365 === true, targets };
-  if (tunnel.enabled && !tunnel.global && !tunnel.m365 && !targets.length) {
-    throw badRequest('Adicione destinos ao túnel ou marque "Global"');
-  }
-  return tunnel;
+  return { mode: body.mode as TunnelMode, m365: body.m365 === true, targets };
 }
 
-export function parseConnection(body: Body): Omit<Connection, 'id'> {
+/** Connection fields edited in the modal (the tunnel has its own endpoint). */
+export function parseConnection(body: Body): Omit<Connection, 'id' | 'tunnel'> {
   return {
     name: text(body, 'name', 'Nome', { required: true, max: 60 }),
     host: text(body, 'host', 'Gateway', { required: true, pattern: hostname, patternMessage: 'Gateway inválido (ex.: vpn.empresa.com.br)' }),
@@ -98,7 +96,6 @@ export function parseConnection(body: Body): Omit<Connection, 'id'> {
     }).toLowerCase(),
     otpRequired: body.otpRequired !== false,
     otpDelay: integer(body, 'otpDelay', 'Atraso do OTP', 0, 30, 2),
-    tunnel: parseTunnel(body.tunnel),
   };
 }
 

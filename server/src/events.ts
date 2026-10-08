@@ -28,6 +28,8 @@ export interface PanelState {
   status: VpnStatus;
   /** Label of the VPN/tunnel action in progress; other such actions are refused meanwhile. */
   busy: string | null;
+  /** Signature of the tunnel last applied by the app (see tunnelSignature), to spot pending edits. */
+  appliedTunnel: string | null;
 }
 
 type Listener = (event: 'state' | 'log' | 'data', data: unknown) => void;
@@ -49,6 +51,7 @@ export const state: PanelState = {
     checkedAt: null,
   },
   busy: null,
+  appliedTunnel: null,
 };
 
 function classify(text: string): LogLevel {

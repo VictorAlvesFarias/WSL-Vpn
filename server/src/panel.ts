@@ -177,7 +177,7 @@ export async function connect(connectionId: string, typedOtp: string): Promise<v
     );
     sayLines(result.stdout + result.stderr);
     if (result.code < 0) say('Tempo esgotado ao conectar.', 'error');
-    if (result.code === 0 && connection.tunnel.enabled) await tunnelOnSteps(connection, distro);
+    if (result.code === 0 && connection.tunnel.mode !== 'off') await tunnelOnSteps(connection, distro);
   });
 }
 
@@ -214,14 +214,29 @@ async function resolveInWsl(distro: string, hosts: string[]): Promise<Map<string
   return resolved;
 }
 
+/** Identifies what a tunnel routes, so the UI can tell when the saved one differs from the applied one. */
+export function tunnelSignature(connection: Connection): string {
+  const { mode, m365, targets } = connection.tunnel;
+  return JSON.stringify({ id: connection.id, mode, m365: mode === 'specific' && m365, targets: mode === 'specific' ? targets : [] });
+}
+
+const hasTargets = (connection: Connection) => connection.tunnel.targets.length > 0 || connection.tunnel.m365;
+
 async function tunnelOnSteps(connection: Connection, distro: string): Promise<boolean> {
   const { tunnel } = connection;
-  const networks = tunnel.targets.filter((t) => /^\d/.test(t));
-  const hosts = tunnel.targets.filter((t) => !/^\d/.test(t) && !t.startsWith('*.'));
-  const domains = tunnel.targets.filter((t) => t.startsWith('*.')).map((t) => `.${t.slice(2)}`);
-  const mode = tunnel.global ? 'tudo' : tunnel.m365 ? 'm365' : 'empresa';
+  const global = tunnel.mode === 'global';
+  // Global ignores the list: everything goes through the tunnel, DNS included.
+  const targets = global ? [] : tunnel.targets;
+  const networks = targets.filter((t) => /^\d/.test(t));
+  const hosts = targets.filter((t) => !/^\d/.test(t) && !t.startsWith('*.'));
+  const domains = targets.filter((t) => t.startsWith('*.')).map((t) => `.${t.slice(2)}`);
+  const mode = global ? 'tudo' : tunnel.m365 ? 'm365' : 'empresa';
+  if (!global && !hasTargets(connection)) {
+    say('Túnel específico sem destinos: adicione algum na lista.', 'warn');
+    return false;
+  }
   say(
-    `Adicionando o túnel no Windows: ${tunnel.global ? 'todo o tráfego' : `${tunnel.targets.length} destino(s)`}${tunnel.m365 && !tunnel.global ? ' + Microsoft 365' : ''} (confirme o UAC)...`,
+    `Adicionando o túnel no Windows: ${global ? 'todo o tráfego (global)' : `${targets.length} destino(s)${tunnel.m365 ? ' + Microsoft 365' : ''}`} (confirme o UAC)...`,
     'step',
   );
 
@@ -259,8 +274,9 @@ async function tunnelOnSteps(connection: Connection, distro: string): Promise<bo
   const params = ['-Action', 'On', '-WslIp', info.WSL_IP, '-Mode', mode];
   if (routes.length) params.push('-Routes', routes.join(','));
   if (info.DNS) params.push('-Dns', info.DNS);
-  // Internal names must resolve on Windows too: whole domains plus each exact host name.
-  const namespaces = [...domains, ...hosts];
+  // Names must resolve on Windows through the company DNS: in global mode all of them ("."),
+  // otherwise the listed domains plus each exact host name.
+  const namespaces = global ? ['.'] : [...domains, ...hosts];
   if (namespaces.length) params.push('-Suffixes', namespaces.join(','));
   if (mode !== 'empresa') params.push('-VpnHost', connection.host);
 
@@ -273,7 +289,8 @@ async function tunnelOnSteps(connection: Connection, distro: string): Promise<bo
     if (previous === 'off') await helper(distro, ['gw-off'], { timeoutMs: 30_000 });
     return false;
   }
-  say(tunnel.global ? 'Túnel ativo: todo o tráfego do Windows passa pela VPN.' : 'Túnel ativo no Windows.', 'ok');
+  updateState({ appliedTunnel: tunnelSignature(connection) });
+  say(global ? 'Túnel global ativo: todo o tráfego do Windows passa pela VPN.' : 'Túnel ativo no Windows.', 'ok');
   if (mode !== 'empresa') say('Feche o Teams por completo e abra de novo para ele reconectar.');
   return true;
 }
@@ -284,21 +301,34 @@ async function tunnelOffSteps(distro: string): Promise<boolean> {
   lines.forEach((line) => say(line));
   if (!ok) return false;
   await helper(distro, ['gw-off'], { timeoutMs: 30_000 });
+  updateState({ appliedTunnel: null });
   say('Túnel removido: Windows fora da rede corporativa.', 'ok');
   return true;
 }
 
-/** Adds the tunnel of the connected connection (or of the given one). */
-export async function tunnelOn(connectionId: string): Promise<void> {
+/**
+ * Makes Windows match the connection's saved tunnel while it is up: removes it in "off" mode,
+ * otherwise (re)applies it (one UAC prompt).
+ */
+export async function applyTunnel(connectionId: string): Promise<void> {
   const connection = await getConnection(connectionId);
   const { distro } = await getSettings();
-  if (!state.status.up) throw new HttpError(409, 'Conecte a VPN antes de adicionar o túnel.');
-  if (!connection.tunnel.global && !connection.tunnel.m365 && !connection.tunnel.targets.length) {
-    throw new HttpError(400, 'Configure o túnel na conexão (Editar > Adicionar túnel).');
+  if (!state.status.up) throw new HttpError(409, 'Conecte a VPN antes de aplicar o túnel.');
+  if (connection.tunnel.mode === 'off') {
+    if (state.status.tunnel === 'off') return;
+    await exclusive('Removendo o túnel', async () => {
+      say('Túnel desativado: removendo do Windows (confirme o UAC)...', 'step');
+      await tunnelOffSteps(distro);
+    });
+    return;
   }
-  await exclusive('Adicionando o túnel', () => tunnelOnSteps(connection, distro));
+  if (connection.tunnel.mode === 'specific' && !hasTargets(connection)) {
+    throw new HttpError(400, 'Adicione destinos à lista do túnel específico.');
+  }
+  await exclusive('Aplicando o túnel', () => tunnelOnSteps(connection, distro));
 }
 
+/** Removes the tunnel (also cleans up leftovers of a previous session). */
 export async function tunnelOff(): Promise<void> {
   const { distro } = await getSettings();
   await exclusive('Removendo o túnel', async () => {

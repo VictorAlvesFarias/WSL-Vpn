@@ -22,6 +22,8 @@ export interface VpnStatus {
 export interface PanelState {
   status: VpnStatus;
   busy: string | null;
+  /** Signature of the tunnel last applied by the app (see tunnelSignature). */
+  appliedTunnel: string | null;
 }
 
 export interface Settings {
@@ -29,9 +31,10 @@ export interface Settings {
   linuxUser: string;
 }
 
+export type TunnelMode = 'off' | 'global' | 'specific';
+
 export interface Tunnel {
-  enabled: boolean;
-  global: boolean;
+  mode: TunnelMode;
   m365: boolean;
   targets: string[];
 }
@@ -50,7 +53,7 @@ export interface Connection {
   hasTotp: boolean;
 }
 
-export type ConnectionInput = Omit<Connection, 'id' | 'hasPassword' | 'hasTotp'> & { password?: string };
+export type ConnectionInput = Omit<Connection, 'id' | 'hasPassword' | 'hasTotp' | 'tunnel'> & { password?: string };
 
 export interface AppData {
   settings: Settings;
@@ -74,9 +77,16 @@ export interface TotpCode {
 }
 
 export function tunnelSummary(tunnel: Tunnel): string {
-  if (tunnel.global) return 'todo o tráfego do Windows';
+  if (tunnel.mode === 'off') return 'Túnel desativado';
+  if (tunnel.mode === 'global') return 'Túnel global';
   const parts = [];
   if (tunnel.targets.length) parts.push(`${tunnel.targets.length} destino${tunnel.targets.length > 1 ? 's' : ''}`);
   if (tunnel.m365) parts.push('Microsoft 365');
-  return parts.join(' + ') || 'sem destinos';
+  return `Túnel específico · ${parts.join(' + ') || 'sem destinos'}`;
+}
+
+/** Same as the server's tunnelSignature: tells whether the saved tunnel differs from the applied one. */
+export function tunnelSignature(connection: Connection): string {
+  const { mode, m365, targets } = connection.tunnel;
+  return JSON.stringify({ id: connection.id, mode, m365: mode === 'specific' && m365, targets: mode === 'specific' ? targets : [] });
 }

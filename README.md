@@ -31,8 +31,8 @@ The installer is unsigned, so SmartScreen warns on first run ("More info" → "R
 ## First run
 
 1. **Instalação**: set the distro and Linux user. If WSL is missing, *Instalar o WSL* (UAC) and reboot. Then *Instalar / reparar*: idempotent, it only redoes what is missing (virtualization, WSL, `.wslconfig` in NAT mode, Ubuntu without interactive provisioning, Linux user, openfortivpn, DNS, restricted sudoers, commands).
-2. **Painel → Nova conexão**: name, gateway, port, user, password and the gateway certificate (detected automatically, or with *Detectar*). Optionally *Adicionar túnel*.
-3. Connect. The OTP field is always there; **left empty, the registered authenticator fills it in**.
+2. **Painel → Nova conexão**: name, gateway, port, user, password and the gateway certificate (detected automatically, or with *Detectar*).
+3. Connect from the list, or open the connection to type the OTP code and choose the tunnel. The OTP field is always there; **left empty, the registered authenticator fills it in**.
 
 Coming from the original panel (or the first app version), the existing setup is imported as one connection. Its Ubuntu commands are older, so the app shows *Atualizar agora*: it reinstalls the commands (`setup.ps1 -SkipPackages`, no WSL restart, the VPN stays up) and moves the stored password and authenticator key to the imported connection, inside WSL.
 
@@ -40,18 +40,21 @@ Coming from the original panel (or the first app version), the existing setup is
 
 Each connection has its own gateway, user, certificate, OTP settings and tunnel. Only one can be up at a time.
 
+- **Screen 1 – list**: every connection with its status, tunnel summary and a *Conectar*/*Desconectar* button. Connections without an authenticator open screen 2 so the code can be typed.
+- **Screen 2 – connection**: status, live authenticator code, OTP field, connect/disconnect, and the tunnel. Editing the connection details (gateway, user, password, certificate, OTP) happens in a modal.
+
 ### Authenticator
 
 *Cadastrar autenticador* (a modal) stores the TOTP key of the connection in the vault. The home screen then shows its live code, like the phone app, and connecting with an empty OTP field uses it (RFC 6238, computed with the Windows clock, which is NTP-synced; near the end of a 30 s window it waits for the next code).
 
 > With the authenticator key on the same PC as the password, anyone with access to this Windows account can connect without your phone. Check that the company policy allows it.
 
-### Tunnel (*Adicionar túnel*)
+### Tunnel (screen 2)
 
-When enabled, the tunnel is added right after connecting (UAC) and removed before disconnecting; the switch on the home screen turns it on and off meanwhile.
+A radio chooses what Windows sends through the connection: **Desativado** (only Linux uses the VPN), **Global** or **Específico**. Changes are saved right away. The tunnel is added right after connecting (UAC) and removed before disconnecting; while connected, changing the mode applies it at once, and list edits wait for *Aplicar alterações*.
 
-- **Global**: all IPv4 traffic from Windows goes through the VPN (the local network and the router DNS stay at home). The company firewall usually blocks much of the internet.
-- **Targets**, one per line:
+- **Global**: all IPv4 traffic from Windows goes through the VPN, and Windows resolves every name through the company DNS (the local network stays at home). The company firewall usually blocks much of the internet.
+- **Específico**: only the targets in the list, added one by one:
 
 | Target | Effect |
 |---|---|

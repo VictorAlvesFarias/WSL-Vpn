@@ -11,15 +11,27 @@ export interface Settings {
   linuxUser: string;
 }
 
+/**
+ * What Windows sends through this connection while it is up:
+ * off - nothing (only Linux uses the VPN); global - every IPv4 destination; specific - the targets.
+ */
+export type TunnelMode = 'off' | 'global' | 'specific';
+export const tunnelModes: readonly TunnelMode[] = ['off', 'global', 'specific'];
+
 export interface Tunnel {
-  /** "Adicionar túnel": Windows also uses this connection while it is up. */
-  enabled: boolean;
-  /** Every IPv4 destination goes through the tunnel. */
-  global: boolean;
-  /** Adds the official Microsoft 365 ranges (Teams, Outlook, OneDrive). */
+  mode: TunnelMode;
+  /** Specific mode: also the official Microsoft 365 ranges (Teams, Outlook, OneDrive). */
   m365: boolean;
-  /** Networks (10.0.0.0/8), IPs, host names (intranet.company.com) or domains (*.company.local). */
+  /** Specific mode: networks (10.0.0.0/8), IPs, host names (intranet.company.com) or domains (*.company.local). */
   targets: string[];
+}
+
+export const emptyTunnel = (): Tunnel => ({ mode: 'off', m365: false, targets: [] });
+
+/** Tunnels saved before the mode existed had enabled/global flags. */
+function normalizeTunnel(raw: Partial<Tunnel> & { enabled?: boolean; global?: boolean }): Tunnel {
+  const mode = raw.mode ?? (raw.enabled ? (raw.global ? 'global' : 'specific') : 'off');
+  return { mode, m365: Boolean(raw.m365), targets: raw.targets ?? [] };
 }
 
 /** A Fortinet SSL-VPN connection. Its password and authenticator key live in the WSL vault. */
@@ -87,8 +99,7 @@ export function fromLegacyEnv(env: Record<string, string>): Data {
       otpRequired: env.VPN_OTP_REQUIRED !== '0',
       otpDelay: Number(env.VPN_OTP_DELAY) || 2,
       tunnel: {
-        enabled: false,
-        global: env.GATEWAY_MODE === 'tudo',
+        mode: 'off',
         m365: env.GATEWAY_MODE === 'm365',
         targets: [
           ...splitList(env.GATEWAY_ROUTES),
@@ -130,7 +141,11 @@ export async function importLegacyEnv(text: string): Promise<void> {
 export async function readData(): Promise<Data> {
   if (!dataExists()) return emptyData();
   const { settings, connections, legacySecrets } = JSON.parse(await readFile(dataFile(), 'utf8')) as Data;
-  return { settings, connections, ...(legacySecrets ? { legacySecrets } : {}) };
+  return {
+    settings,
+    connections: connections.map((c) => ({ ...c, tunnel: normalizeTunnel(c.tunnel ?? {}) })),
+    ...(legacySecrets ? { legacySecrets } : {}),
+  };
 }
 
 // Serialize writes so concurrent requests can't clobber each other.

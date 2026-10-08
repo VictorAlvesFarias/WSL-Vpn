@@ -370,18 +370,12 @@ main {
   color: var(--warn);
 }
 
-/* Panel */
+/* Panel: screen (list or connection) beside the activity log */
 .panel-layout {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
   gap: 18px;
   min-height: 100%;
-}
-
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
 }
 
 .panel-main {
@@ -391,56 +385,81 @@ main {
   min-width: 0;
 }
 
-.panel-main .log-card {
-  flex: 1;
-  min-height: 200px;
+.panel-layout > .log-card {
+  min-height: 280px;
 }
 
-.list-card {
-  padding: 14px;
+/* Screen 1: connection list */
+.connection-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
-.list-head {
+.section-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: 12px;
 }
 
-.list {
+.section-head h2 {
+  font-size: 17px;
+}
+
+.connection-cards {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 10px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.list-empty {
-  padding: 10px 4px;
-}
-
-.list-item {
+.connection-card {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
-  padding: 9px 10px;
-  border: 1px solid transparent;
-  border-radius: 10px;
+  padding: 10px 12px 10px 6px;
+  transition: border-color 0.15s;
+}
+
+.connection-card:hover {
+  border-color: var(--accent);
+}
+
+.connection-card.is-up {
+  border-color: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft), var(--shadow);
+}
+
+.connection-card-body {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 9px;
   background: transparent;
   color: var(--muted);
   text-align: left;
   cursor: pointer;
 }
 
-.list-item:hover {
+.connection-card-body:hover {
   background: var(--surface-2);
 }
 
-.list-item.is-selected {
-  border-color: var(--accent);
+.connection-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.chip-accent {
   background: var(--accent-soft);
   color: var(--accent);
 }
@@ -455,6 +474,7 @@ main {
 .list-text strong {
   overflow: hidden;
   color: var(--text);
+  font-size: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -480,7 +500,13 @@ main {
   font-size: 18px;
 }
 
-/* Selected connection */
+/* Screen 2: one connection */
+.connection-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .connection-panel {
   display: flex;
   flex-direction: column;
@@ -657,85 +683,133 @@ main {
 }
 
 /* Tunnel */
-.tunnel-row {
+.tunnel-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+  transition: border-color 0.15s;
+}
+
+.tunnel-card.is-on {
+  border-color: var(--ok);
+}
+
+.tunnel-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.radio-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.radio-card:hover {
+  border-color: var(--accent);
+}
+
+.radio-card.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.radio-card.is-locked {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.radio-card input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.radio-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.targets {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.targets .input-row input {
+  height: 38px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  outline: none;
+}
+
+.targets .input-row input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.targets-empty {
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 9px;
+  text-align: center;
+}
+
+.target-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  list-style: none;
+}
+
+.target-list li {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  gap: 10px;
+  padding: 4px 6px 4px 12px;
+  border-bottom: 1px solid var(--border);
   color: var(--muted);
 }
 
-.tunnel-row.is-on {
-  border-color: var(--ok);
-  background: var(--ok-soft);
-  color: var(--ok);
+.target-list li:last-child {
+  border-bottom: 0;
 }
 
-.tunnel-text {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
+.target-list code {
   color: var(--text);
 }
 
-.switch {
-  position: relative;
-  flex: none;
-  width: 44px;
-  height: 24px;
-}
-
-.switch input {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  margin: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.switch input:disabled {
-  cursor: default;
-}
-
-.switch span {
-  position: absolute;
-  inset: 0;
-  border-radius: 999px;
-  background: var(--border);
-  transition: background 0.2s;
-}
-
-.switch span::after {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
-  content: '';
-  transition: transform 0.2s;
-}
-
-.switch input:checked + span {
-  background: var(--ok);
-}
-
-.switch input:checked + span::after {
-  transform: translateX(20px);
-}
-
-.switch input:disabled + span {
-  opacity: 0.5;
-}
-
-.switch input:focus-visible + span {
-  box-shadow: 0 0 0 3px var(--accent-soft);
+.tunnel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
 /* Connection form */
@@ -809,25 +883,6 @@ input.tiny {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-.tunnel-box {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-}
-
-.tunnel-box.is-on {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
-}
-
-.check.strong {
-  font-size: 14.5px;
-  font-weight: 650;
-}
-
 .link-button.small {
   font-size: 12.5px;
 }
@@ -845,7 +900,8 @@ input.tiny {
 
 @media (max-width: 900px) {
   .panel-layout,
-  .connection-body {
+  .connection-body,
+  .radio-cards {
     grid-template-columns: 1fr;
   }
 }

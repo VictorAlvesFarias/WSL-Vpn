@@ -21,24 +21,21 @@ const blank: ConnectionInput = {
   trustedCert: '',
   otpRequired: true,
   otpDelay: 2,
-  tunnel: { enabled: false, global: false, m365: false, targets: [] },
 };
 
+/** Connection details. The tunnel is set on the connection screen. */
 export function ConnectionForm({ connection, vaultReady, onClose, onSaved }: ConnectionFormProps) {
   const [draft, setDraft] = useState<ConnectionInput>(() => {
     if (!connection) return blank;
-    const { id: _id, hasPassword: _p, hasTotp: _t, ...rest } = connection;
+    const { id: _id, hasPassword: _p, hasTotp: _t, tunnel: _tunnel, ...rest } = connection;
     return rest;
   });
-  const [targetsText, setTargetsText] = useState((connection?.tunnel.targets ?? []).join('\n'));
   const [saving, setSaving] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const set = <K extends keyof ConnectionInput>(key: K, value: ConnectionInput[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
-  const setTunnel = (patch: Partial<ConnectionInput['tunnel']>) =>
-    setDraft((current) => ({ ...current, tunnel: { ...current.tunnel, ...patch } }));
 
   async function detect() {
     setDetecting(true);
@@ -56,12 +53,8 @@ export function ConnectionForm({ connection, vaultReady, onClose, onSaved }: Con
     event.preventDefault();
     setSaving(true);
     setError(null);
-    const input: ConnectionInput = {
-      ...draft,
-      tunnel: { ...draft.tunnel, targets: targetsText.split(/[\n,;]+/).map((t) => t.trim()).filter(Boolean) },
-    };
     try {
-      onSaved(connection ? await api.updateConnection(connection.id, input) : await api.createConnection(input));
+      onSaved(connection ? await api.updateConnection(connection.id, draft) : await api.createConnection(draft));
     } catch (err) {
       setError((err as Error).message);
       setSaving(false);
@@ -149,51 +142,6 @@ export function ConnectionForm({ connection, vaultReady, onClose, onSaved }: Con
           )}
         </div>
       </div>
-
-      <section className={`tunnel-box${draft.tunnel.enabled ? ' is-on' : ''}`}>
-        <label className="check strong">
-          <input type="checkbox" checked={draft.tunnel.enabled} onChange={(e) => setTunnel({ enabled: e.target.checked })} />
-          Adicionar túnel
-        </label>
-        <p className="muted small">
-          O Windows também passa a usar esta VPN enquanto ela estiver conectada (pede o UAC): o RDP (mstsc), o navegador
-          e qualquer programa alcançam os destinos abaixo. Sem o túnel, só o Linux usa a VPN.
-        </p>
-        {draft.tunnel.enabled && (
-          <>
-            <label className="check">
-              <input type="checkbox" checked={draft.tunnel.global} onChange={(e) => setTunnel({ global: e.target.checked })} />
-              Global: todo o tráfego do Windows pela VPN
-            </label>
-            {draft.tunnel.global && (
-              <p className="hint warn-text small">
-                <Icon name="alert" size={13} /> O firewall da empresa costuma bloquear boa parte da internet (Google, YouTube…).
-              </p>
-            )}
-            <label className="field">
-              <span>{draft.tunnel.global ? 'Domínios internos (opcional)' : 'Destinos do túnel'}</span>
-              <textarea
-                className="mono"
-                rows={5}
-                value={targetsText}
-                onChange={(e) => setTargetsText(e.target.value)}
-                placeholder={'10.0.0.0/8\nintranet.empresa.com.br\nhttps://portal.empresa.com.br\n*.empresa.local'}
-                spellCheck={false}
-              />
-              <small className="muted">
-                Um por linha. Redes e IPs vão pelo túnel; endereços/URLs são resolvidos pelo DNS da empresa e roteados;
-                <code> *.dominio</code> faz o Windows resolver esse domínio no DNS da empresa.
-              </small>
-            </label>
-            {!draft.tunnel.global && (
-              <label className="check">
-                <input type="checkbox" checked={draft.tunnel.m365} onChange={(e) => setTunnel({ m365: e.target.checked })} />
-                Incluir Microsoft 365 (Teams, Outlook, OneDrive)
-              </label>
-            )}
-          </>
-        )}
-      </section>
 
       {!vaultReady && (
         <p className="hint warn-text small">

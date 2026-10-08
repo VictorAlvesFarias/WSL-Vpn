@@ -1,4 +1,4 @@
-import type { AppData, Connection, ConnectionInput, Settings, SystemInfo, TotpCode } from './types';
+import type { AppData, Connection, ConnectionInput, Settings, SystemInfo, TotpCode, Tunnel } from './types';
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -30,7 +30,8 @@ export const api = {
 
   connect: (id: string, otp: string) => request<{ ok: boolean }>('POST', `/connections/${id}/connect`, { otp }),
   disconnect: () => request<{ ok: boolean }>('POST', '/vpn/disconnect'),
-  tunnelOn: (id: string) => request<{ ok: boolean }>('POST', `/connections/${id}/tunnel`),
+  saveTunnel: (id: string, tunnel: Tunnel) => request<Connection>('PUT', `/connections/${id}/tunnel`, tunnel),
+  applyTunnel: (id: string) => request<{ ok: boolean }>('POST', `/connections/${id}/tunnel/apply`),
   tunnelOff: () => request<{ ok: boolean }>('POST', '/tunnel/off'),
 
   totp: (id: string) => request<TotpCode & { enabled: boolean }>('GET', `/connections/${id}/totp`),

@@ -4,6 +4,7 @@ import express, { type ErrorRequestHandler, type Request } from 'express';
 import { dataChanged, listenerCount, recentLog, say, state, subscribe } from './events.ts';
 import { finishPendingMigration, importExistingSetup, installWsl, runInstall, systemInfo, updateCommands } from './installer.ts';
 import {
+  applyTunnel,
   connect,
   currentTotp,
   detectCertificate,
@@ -12,12 +13,11 @@ import {
   refreshStatus,
   saveTotp,
   tunnelOff,
-  tunnelOn,
 } from './panel.ts';
 import { paths } from './paths.ts';
-import { getSettings, mutate, newId, readData, type Connection } from './store.ts';
+import { emptyTunnel, getSettings, mutate, newId, readData, type Connection } from './store.ts';
 import { parseTotpSecret, totpNow } from './totp.ts';
-import { badRequest, HttpError, optionalSecret, parseConnection, parseSecret, parseSettings } from './validation.ts';
+import { badRequest, HttpError, optionalSecret, parseConnection, parseSecret, parseSettings, parseTunnel } from './validation.ts';
 import {
   forgetSecrets,
   helperVersion,
@@ -58,7 +58,7 @@ async function applySecret(kind: SecretKind, id: string, value: string | undefin
 }
 
 /** Fills in the gateway certificate when it was left empty; never blocks saving. */
-async function withCertificate<T extends Omit<Connection, 'id'>>(connection: T): Promise<T> {
+async function withCertificate<T extends Omit<Connection, 'id' | 'tunnel'>>(connection: T): Promise<T> {
   if (connection.trustedCert) return connection;
   try {
     const trustedCert = await detectCertificate(connection.host, connection.port);
@@ -137,7 +137,7 @@ export function createApp() {
     const id = newId();
     // Secret first: if the vault refuses it, nothing is half-saved.
     await applySecret('VPN_PASSWORD', id, password || undefined);
-    const connection: Connection = { id, ...input };
+    const connection: Connection = { id, ...input, tunnel: emptyTunnel() };
     await mutate((data) => {
       data.connections.push(connection);
     });
@@ -152,7 +152,8 @@ export function createApp() {
     const connection = await mutate((data) => {
       const index = data.connections.findIndex((c) => c.id === id);
       if (index < 0) throw new HttpError(404, 'Conexão não encontrada');
-      data.connections[index] = { id, ...input };
+      // The tunnel is edited separately (see /tunnel below).
+      data.connections[index] = { ...data.connections[index], ...input };
       return data.connections[index];
     });
     dataChanged();
@@ -187,8 +188,23 @@ export function createApp() {
     res.json({ ok: true });
   });
 
-  app.post('/api/connections/:id/tunnel', async (req, res) => {
-    await tunnelOn(req.params.id);
+  // The tunnel is edited on the connection screen; saving never touches Windows by itself.
+  app.put('/api/connections/:id/tunnel', async (req, res) => {
+    const id = req.params.id;
+    const tunnel = parseTunnel(body(req));
+    const connection = await mutate((data) => {
+      const found = data.connections.find((c) => c.id === id);
+      if (!found) throw new HttpError(404, 'Conexão não encontrada');
+      found.tunnel = tunnel;
+      return found;
+    });
+    dataChanged();
+    res.json(connection);
+  });
+
+  // Makes Windows match the saved tunnel while the VPN is up (UAC).
+  app.post('/api/connections/:id/tunnel/apply', async (req, res) => {
+    await applyTunnel(req.params.id);
     res.json({ ok: true });
   });
 
