@@ -15,8 +15,8 @@ npm-debug.log*
 .env
 .env.*
 
-# Local app data, in case GITUSER_HOME points inside the repo
-.gituser/
+# Local app data, in case WSLVPN_HOME points inside the repo
+.wsl-vpn/
 
 # OS / editor
 .DS_Store
