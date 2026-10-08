@@ -16,6 +16,8 @@ const paths = {
   save: 'M5 4h11l3 3v13H5z M8 4v5h7V4 M8 20v-6h8v6',
   refresh: 'M20 11a8 8 0 1 0-2.3 5.7 M20 4v7h-7',
   x: 'M6 6l12 12 M18 6 6 18',
+  plus: 'M12 5v14 M5 12h14',
+  edit: 'M4 20h4L19 9l-4-4L4 16v4Z M13.5 6.5l4 4',
   alert: 'M12 4 2.5 20h19L12 4Z M12 10v4 M12 17h.01',
   upload: 'M12 20V9 M7 14l5-5 5 5 M5 4h14',
 };

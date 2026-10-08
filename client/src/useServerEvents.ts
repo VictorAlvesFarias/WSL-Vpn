@@ -1,13 +1,18 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { LogEntry, PanelState } from './types';
 
 const maxEntries = 500;
 
-/** Live panel state and log pushed by the server (Server-Sent Events, auto-reconnecting). */
-export function useServerEvents() {
+/**
+ * Live panel state and log pushed by the server (Server-Sent Events, auto-reconnecting).
+ * onDataChanged fires when connections or vault flags change.
+ */
+export function useServerEvents(onDataChanged: () => void) {
   const [state, setState] = useState<PanelState | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [connected, setConnected] = useState(false);
+  const dataChanged = useRef(onDataChanged);
+  dataChanged.current = onDataChanged;
 
   useEffect(() => {
     const source = new EventSource('/api/events');
@@ -20,6 +25,7 @@ export function useServerEvents() {
       const entry = JSON.parse((event as MessageEvent).data) as LogEntry;
       setLog((current) => [...current.slice(-(maxEntries - 1)), entry]);
     });
+    source.addEventListener('data', () => dataChanged.current());
     return () => source.close();
   }, []);
 

@@ -1,23 +1,19 @@
 # WSL-Vpn
 
-Desktop app for a corporate **Fortinet SSL-VPN running inside WSL2**, so that **only traffic originating in Linux goes through the VPN**. Windows stays on the normal network (no routes, DNS or gateway from the tunnel), and RDP to internal machines runs through FreeRDP with the window shown on Windows via WSLg.
+Desktop app for corporate **Fortinet SSL-VPN connections running inside WSL2**, so that by default **only traffic originating in Linux goes through the VPN**. Windows stays on the normal network until you add a **tunnel**: then Windows reaches the chosen destinations (or everything) through the VPN that is already open in WSL2. RDP, browsers and any other program just use it, with no VPN client installed on Windows.
 
 ```
 Windows host
-├── Internet / home network        <-- untouched
-├── personal apps
-│
-└── WSL2 (own NAT network)
-    ├── openfortivpn  -> corporate SSL-VPN (ppp0)
-    └── xfreerdp3     -> RDP to internal machines (window via WSLg)
+├── Internet / home network            <-- untouched
+├── mstsc, browser, ... ──(tunnel targets, optional)──┐
+│                                                     ▼
+└── WSL2 (own NAT network) ── openfortivpn ── ppp0 ── corporate network
 ```
-
-It replaces the Python/Tk panel and the `Install.cmd`/`config.env` workflow of the original project with a single app: **Painel** (connect, RDP, use the VPN on Windows), **Configurações** and **Instalação**.
 
 ## Structure
 
-- **server/** – Express API (TypeScript run natively by Node 24) on `127.0.0.1:4312`. Drives `wsl.exe`, streams state and log to the UI with Server-Sent Events.
-- **server/scripts/** – PowerShell scripts: `install.ps1` (Windows + Ubuntu), `setup.ps1` (Ubuntu; embeds the Linux scripts), `gateway.ps1` (Windows routes/DNS, elevated), `wslg-reset.ps1`, `raise-window.ps1`.
+- **server/** – Express API (TypeScript run natively by Node 24) on `127.0.0.1:4312`. Drives `wsl.exe`, streams state and log to the UI with Server-Sent Events. Connections are stored in `~/.wsl-vpn/data.json` (override with `WSLVPN_HOME`).
+- **server/scripts/** – PowerShell: `install.ps1` (Windows + Ubuntu), `setup.ps1` (Ubuntu; embeds the Linux commands `vpn-up`, `vpn-down`, `vpn-helper`), `gateway.ps1` (Windows routes/DNS, elevated).
 - **client/** – React + Vite UI on `127.0.0.1:5312` (proxies `/api`).
 - **desktop/** – Electron shell and NSIS installer.
 
@@ -34,48 +30,51 @@ The installer is unsigned, so SmartScreen warns on first run ("More info" → "R
 
 ## First run
 
-1. **Configurações**: fill in the VPN, RDP and Ubuntu fields. If Ubuntu was already set up by the original panel, the configuration is imported automatically from `/etc/vpnwsl.env`.
-2. **Instalação**: if WSL is missing, *Instalar o WSL* (UAC) and reboot. Then *Instalar / reparar*. It is idempotent: it checks before acting and only redoes what is missing (virtualization, WSL, `.wslconfig` in NAT mode, Ubuntu without interactive provisioning, Linux user, gateway certificate fingerprint, packages, DNS, VPN config, restricted sudoers, commands, vault).
-3. **Painel**: connect. With an authenticator key registered, the OTP code is generated automatically (RFC 6238, computed with the Windows clock).
+1. **Instalação**: set the distro and Linux user. If WSL is missing, *Instalar o WSL* (UAC) and reboot. Then *Instalar / reparar*: idempotent, it only redoes what is missing (virtualization, WSL, `.wslconfig` in NAT mode, Ubuntu without interactive provisioning, Linux user, openfortivpn, DNS, restricted sudoers, commands).
+2. **Painel → Nova conexão**: name, gateway, port, user, password and the gateway certificate (detected automatically, or with *Detectar*). Optionally *Adicionar túnel*.
+3. Connect. The OTP field is always there; **left empty, the registered authenticator fills it in**.
 
-Coming from the original panel, the Ubuntu commands are version 1; the app shows a banner to update them (*Atualizar agora*, which runs `setup.ps1 -OnlyConfig`: no packages, no WSL restart).
+Coming from the original panel (or the first app version), the existing setup is imported as one connection. Its Ubuntu commands are older, so the app shows *Atualizar agora*: it reinstalls the commands (`setup.ps1 -SkipPackages`, no WSL restart, the VPN stays up) and moves the stored password and authenticator key to the imported connection, inside WSL.
 
-## Secrets
+## Connections
 
-Nothing secret is stored on Windows. `~/.wsl-vpn/config.env` (override with `WSLVPN_HOME`) holds only the configuration; passwords go straight to the vault inside WSL2:
+Each connection has its own gateway, user, certificate, OTP settings and tunnel. Only one can be up at a time.
 
-| Secret | Where |
-|---|---|
-| VPN and RDP passwords | `/etc/vpnwsl.secrets`, `600 root:root` (*Configurações → Senhas no cofre*, or the install form) |
-| Authenticator key | same vault (`TOTP_SECRET`) |
-| Linux password | applied with `chpasswd` during install, never stored |
-| OTP code | never stored |
+### Authenticator
 
-- Secrets travel through stdin only (`vpn-helper set-secret`, `openfortivpn`, `xfreerdp3 /from-stdin`), never on a command line.
-- The vault is only reachable through `/usr/local/sbin/vpn-helper`, the **only** binary allowed in sudoers.
-- `/etc/vpnwsl.env` (world-readable copy of the configuration) never contains passwords; setup aborts if one leaks there.
-- The local API only accepts requests to `localhost`, and state-changing requests must carry the `x-wsl-vpn` header, so other websites can't drive it.
+*Cadastrar autenticador* (a modal) stores the TOTP key of the connection in the vault. The home screen then shows its live code, like the phone app, and connecting with an empty OTP field uses it (RFC 6238, computed with the Windows clock, which is NTP-synced; near the end of a 30 s window it waits for the next code).
 
 > With the authenticator key on the same PC as the password, anyone with access to this Windows account can connect without your phone. Check that the company policy allows it.
 
-## Use the VPN on Windows (optional)
+### Tunnel (*Adicionar túnel*)
 
-Makes Windows reach the corporate network through the tunnel already open in WSL2 (e.g. `mstsc`, intranet, database clients) without installing a VPN client on Windows. Turning it on or off asks for UAC.
+When enabled, the tunnel is added right after connecting (UAC) and removed before disconnecting; the switch on the home screen turns it on and off meanwhile.
 
-| Mode | Through the tunnel | At home |
-|---|---|---|
-| **Empresa** | networks in *Redes da empresa* | everything else |
-| **+ Microsoft 365** | + official Microsoft 365 ranges (Teams, SharePoint/OneDrive, Outlook, login) | everything else |
-| **Tudo** | all IPv4 traffic from Windows | only the local network and the router DNS |
+- **Global**: all IPv4 traffic from Windows goes through the VPN (the local network and the router DNS stay at home). The company firewall usually blocks much of the internet.
+- **Targets**, one per line:
 
-- WSL2 forwards and masquerades (NAT) Windows traffic into `ppp0`; Windows gets routes with WSL2 as next hop and NRPT rules so only *Domínios internos* use the corporate DNS.
-- In **+ Microsoft 365** and **Tudo**, the VPN gateway gets an exception route through the home router, otherwise the tunnel would try to go through itself.
-- If the VPN drops with the gateway on, the app removes the routes by itself (UAC) to give Windows its internet back.
-- Routes vanish on reboot; the DNS rule doesn't. If the panel shows *Restos de rotas/DNS no Windows*, click *Limpar rotas do Windows*.
+| Target | Effect |
+|---|---|
+| `10.0.0.0/8`, `10.1.2.3` | routed through the tunnel |
+| `intranet.company.com`, `https://portal.company.com/app` | resolved through the company DNS (inside WSL) and routed; Windows also resolves that name through the company DNS |
+| `*.company.local` | Windows resolves the whole domain through the company DNS (add the networks it lives in as targets) |
+
+- **Incluir Microsoft 365**: adds the official Microsoft 365 ranges (Teams, SharePoint/OneDrive, Outlook, login), fetched from `endpoints.office.com` with a local cache.
+
+How it works: WSL2 forwards and masquerades (NAT) Windows traffic into `ppp0`; Windows gets routes with WSL2 as next hop (in the ActiveStore, gone on reboot) and NRPT rules tagged `vpnwsl-gateway`. In global/Microsoft 365 mode the VPN gateway gets an exception route through the home router, otherwise the tunnel would try to go through itself. If the VPN drops with the tunnel on, the app removes it (UAC) to give Windows its internet back. Leftovers (e.g. after a reboot, which keeps NRPT rules) show up as *Limpar túnel*.
+
+## Secrets
+
+Nothing secret is stored on Windows. Passwords and authenticator keys go straight to the vault inside WSL2, `/etc/vpnwsl.secrets` (`600 root:root`), as `VPN_PASSWORD_<id>` and `TOTP_SECRET_<id>`.
+
+- Secrets travel through stdin only (`vpn-helper set-secret`, `openfortivpn`), never on a command line; the app only ever reads the authenticator key (to compute codes) and the list of secret names.
+- The vault is only reachable through `/usr/local/sbin/vpn-helper`, the **only** binary allowed in sudoers besides `openfortivpn` and stopping it.
+- Connection parameters reach Linux as literal arguments (`wsl.exe --exec`), never through a shell.
+- The local API only accepts requests to `localhost`, and state-changing requests must carry the `x-wsl-vpn` header, so other websites can't drive it.
 
 ## Why the isolation works
 
-WSL2 in **NAT mode** runs in a light VM with its own network stack; the routes `openfortivpn` creates exist only inside it. The installer writes `%USERPROFILE%\.wslconfig`:
+WSL2 in **NAT mode** runs in a light VM with its own network stack; the routes `openfortivpn` creates exist only inside it. The installer writes `%USERPROFILE%\.wslconfig` (keeping a `.bak` of a different one):
 
 ```ini
 [wsl2]
@@ -84,7 +83,7 @@ dnsTunneling=false      # Linux uses the VPN DNS, not the Windows one
 autoProxy=false
 ```
 
-To check, with the VPN connected:
+To check, with the VPN connected and no tunnel:
 
 ```powershell
 Get-NetRoute -DestinationPrefix '0.0.0.0/0'   # Windows: still the LAN gateway, no ppp
@@ -93,8 +92,8 @@ wsl -d Ubuntu-24.04 -- ip route               # WSL2: here are the VPN routes
 
 ## Troubleshooting
 
-- **OTP rejected**: codes last ~30 s. If it fails on timing, raise *Atraso do OTP* to 3–4 and *Salvar e aplicar no Ubuntu*.
-- **`Gateway certificate validation failed`**: the gateway certificate changed. Run *Instalar / reparar* with *Atualizar o certificado do gateway* checked.
+- **OTP rejected**: codes last ~30 s. If it fails on timing, raise the OTP delay of the connection to 3–4 s.
+- **`Gateway certificate validation failed`**: the gateway certificate changed. Edit the connection and click *Detectar*.
+- **A tunnel host name didn't resolve**: it is resolved through the company DNS while connected; check the name, or add its network instead.
 - **No internet in WSL2 after disconnecting**: the app restores it on disconnect and before each connection. Manually: `wsl -d Ubuntu-24.04 -- sudo vpn-helper net-restore`.
-- **RDP window doesn't show up**: the app restarts the WSLg host before each session and brings the window to the front; if it still fails, the log shows the `rdp-connect` output. Last resort: `wsl --shutdown`.
 - **Start from scratch**: `wsl --unregister Ubuntu-24.04` (deletes Ubuntu and the vault), then *Instalar / reparar*.

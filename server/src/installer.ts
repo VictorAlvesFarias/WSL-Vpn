@@ -1,66 +1,56 @@
-import { configExists, parseEnv, pickConfig, readConfig, writeConfig } from './config.ts';
 import { installWslElevated } from './elevated.ts';
-import { say, state, updateState } from './events.ts';
+import { dataChanged, say, state, updateState } from './events.ts';
 import { runPowerShellScript } from './exec.ts';
-import { refreshStatus, refreshTotpEnabled } from './panel.ts';
-import { configFile, scriptPath } from './paths.ts';
+import { refreshStatus } from './panel.ts';
+import { scriptPath } from './paths.ts';
+import { dataExists, getSettings, importLegacyEnv, migrateLegacyConfigFile } from './store.ts';
 import { HttpError } from './validation.ts';
-import { helper, isWslInstalled, listDistros, wsl } from './wsl.ts';
-
-/** Version of vpn-helper this app expects (see setup.ps1). The original panel's helper is 1. */
-export const expectedHelperVersion = 2;
+import { forgetHelperVersion, helperVersion, migrateLegacySecrets, requiredHelperVersion } from './vault.ts';
+import { isWslInstalled, listDistros, wslExec } from './wsl.ts';
 
 export interface SystemInfo {
   wslInstalled: boolean;
   distro: string;
   distroInstalled: boolean;
-  /** vpn-up and vpn-helper are installed in the distro. */
-  configured: boolean;
+  /** vpn-helper version in the distro (null when not installed). */
   helperVersion: number | null;
-  configExists: boolean;
-  configPath: string;
+  requiredHelperVersion: number;
+  settingsSaved: boolean;
 }
 
 export async function systemInfo(): Promise<SystemInfo> {
-  const config = await readConfig();
+  const settings = await getSettings();
   const info: SystemInfo = {
     wslInstalled: await isWslInstalled(),
-    distro: config.WSL_DISTRO,
+    distro: settings.distro,
     distroInstalled: false,
-    configured: false,
     helperVersion: null,
-    configExists: configExists(),
-    configPath: configFile(),
+    requiredHelperVersion,
+    settingsSaved: Boolean(settings.linuxUser),
   };
   if (!info.wslInstalled) return info;
-  info.distroInstalled = (await listDistros()).includes(config.WSL_DISTRO);
-  if (!info.distroInstalled) return info;
-
-  const result = await wsl(
-    config.WSL_DISTRO,
-    ['bash', '-lc', 'command -v vpn-up >/dev/null && echo UP=yes; echo HELPER=$(sudo -n vpn-helper version 2>/dev/null)'],
-    { timeoutMs: 30_000 },
-  );
-  info.configured = result.stdout.includes('UP=yes');
-  const version = /HELPER=(\d+)/.exec(result.stdout);
-  // The original helper has no "version" command but is installed alongside vpn-up.
-  info.helperVersion = version ? Number(version[1]) : info.configured ? 1 : null;
+  info.distroInstalled = (await listDistros()).includes(settings.distro);
+  if (info.distroInstalled) info.helperVersion = await helperVersion(settings.distro, true);
   return info;
 }
 
 /**
- * First run with an existing installation (e.g. from the original panel): the distro keeps a
- * copy of the configuration, without passwords, in /etc/vpnwsl.env.
+ * First run: brings in the single-connection configuration of an existing installation, either
+ * from the first app version (config.env) or from the original panel (/etc/vpnwsl.env in the
+ * distro). Its secrets are renamed once the Ubuntu commands are up to date.
  */
-export async function importConfigFromDistro(): Promise<boolean> {
-  if (configExists()) return false;
-  const distro = (await readConfig()).WSL_DISTRO;
-  if (!(await listDistros()).includes(distro)) return false;
-  const result = await wsl(distro, ['cat', '/etc/vpnwsl.env'], { timeoutMs: 30_000 });
-  if (result.code !== 0 || !result.stdout.includes('VPN_HOST')) return false;
-  await writeConfig(pickConfig({ WSL_DISTRO: distro, ...parseEnv(result.stdout) }));
-  say('Configuração importada do Ubuntu já instalado (/etc/vpnwsl.env).', 'ok');
-  return true;
+export async function importExistingSetup(): Promise<void> {
+  if (dataExists()) return;
+  if (await migrateLegacyConfigFile()) {
+    say('Configuração anterior convertida em uma conexão VPN.', 'ok');
+    return;
+  }
+  const distro = (await getSettings()).distro;
+  if (!(await listDistros()).includes(distro)) return;
+  const result = await wslExec(distro, ['cat', '/etc/vpnwsl.env'], { timeoutMs: 30_000 });
+  if (result.code !== 0 || !result.stdout.includes('VPN_HOST')) return;
+  await importLegacyEnv(result.stdout);
+  say('Configuração do Ubuntu já instalado importada como uma conexão VPN.', 'ok');
 }
 
 function exclusiveTask(label: string) {
@@ -72,52 +62,51 @@ function exclusiveTask(label: string) {
   };
 }
 
-export interface InstallOptions {
-  linuxPassword: string;
-  vpnPassword: string;
-  rdpPassword: string;
-  updateCert: boolean;
+/** After the commands change: re-check the helper, rename legacy secrets, refresh the UI. */
+async function afterCommandsChanged(): Promise<void> {
+  forgetHelperVersion();
+  await migrateLegacySecrets((await getSettings()).distro);
+  dataChanged();
 }
 
 /** Runs install.ps1, streaming its output to the log. Returns its exit code. */
-export async function runInstall(options: InstallOptions): Promise<number> {
-  if (!configExists()) throw new HttpError(400, 'Salve a configuração antes de instalar.');
+export async function runInstall(linuxPassword: string): Promise<number> {
+  const settings = await getSettings();
+  if (!settings.linuxUser) throw new HttpError(400, 'Salve o usuário do Linux antes de instalar.');
   const done = exclusiveTask('Instalando');
   try {
     say('Instalação iniciada. O WSL será reiniciado: a VPN, se conectada, vai cair.', 'step');
-    // Passwords travel through stdin as base64 JSON: never on a command line, and immune to
-    // the console code page.
-    const payload = Buffer.from(
-      JSON.stringify({ linuxPassword: options.linuxPassword, vpnPassword: options.vpnPassword, rdpPassword: options.rdpPassword }),
-      'utf8',
-    ).toString('base64');
-    const args = ['-Config', configFile(), '-SecretsFromStdin', ...(options.updateCert ? ['-UpdateCert'] : [])];
-    const result = await runPowerShellScript(scriptPath('install.ps1'), args, {
-      input: payload + '\n',
-      timeoutMs: 30 * 60_000,
-      onLine: (line) => say(line),
-    });
+    // The password travels through stdin as base64 JSON: never on a command line, and immune
+    // to the console code page.
+    const payload = Buffer.from(JSON.stringify({ linuxPassword }), 'utf8').toString('base64');
+    const result = await runPowerShellScript(
+      scriptPath('install.ps1'),
+      ['-Distro', settings.distro, '-LinuxUser', settings.linuxUser, '-SecretsFromStdin'],
+      { input: payload + '\n', timeoutMs: 30 * 60_000, onLine: (line) => say(line) },
+    );
     if (result.code === 0) say('Instalação concluída.', 'ok');
     else say(`A instalação terminou com erro (código ${result.code}).`, 'error');
+    await afterCommandsChanged();
     return result.code;
   } finally {
     done();
-    void refreshTotpEnabled();
   }
 }
 
-/** Re-applies the configuration inside Ubuntu (setup.ps1 -OnlyConfig): fast, no packages. */
-export async function applyConfig(): Promise<number> {
-  const config = await readConfig();
-  const done = exclusiveTask('Aplicando a configuração no Ubuntu');
+/** Reinstalls only the Ubuntu commands, base config and sudoers (no packages, no WSL restart). */
+export async function updateCommands(): Promise<number> {
+  const settings = await getSettings();
+  if (!settings.linuxUser) throw new HttpError(400, 'Salve o usuário do Linux em Instalação.');
+  const done = exclusiveTask('Atualizando os comandos do Ubuntu');
   try {
-    say('Aplicando a configuração no Ubuntu...', 'step');
+    say('Atualizando os comandos do Ubuntu (a VPN conectada continua de pé)...', 'step');
     const result = await runPowerShellScript(
       scriptPath('setup.ps1'),
-      ['-Distro', config.WSL_DISTRO, '-Config', configFile(), '-OnlyConfig'],
+      ['-Distro', settings.distro, '-LinuxUser', settings.linuxUser, '-SkipPackages'],
       { timeoutMs: 5 * 60_000, onLine: (line) => say(line) },
     );
-    if (result.code !== 0) say('Falha ao aplicar a configuração.', 'error');
+    if (result.code !== 0) say('Falha ao atualizar os comandos.', 'error');
+    await afterCommandsChanged();
     return result.code;
   } finally {
     done();
@@ -136,31 +125,11 @@ export async function installWsl(): Promise<boolean> {
   }
 }
 
-// -------------------------------------------------------------------- vault
-
-export const vaultSecrets = ['VPN_PASSWORD', 'RDP_PASSWORD'] as const;
-export type VaultSecret = (typeof vaultSecrets)[number];
-
-/** Which secrets are stored. Values never leave this process. */
-export async function vaultStatus(): Promise<Record<VaultSecret | 'TOTP_SECRET', boolean>> {
-  const distro = (await readConfig()).WSL_DISTRO;
-  const has = async (name: string) =>
-    (await helper(distro, ['get', name], { timeoutMs: 20_000 })).stdout.trim().length > 0;
-  const [vpn, rdp, totp] = await Promise.all([has('VPN_PASSWORD'), has('RDP_PASSWORD'), has('TOTP_SECRET')]);
-  return { VPN_PASSWORD: vpn, RDP_PASSWORD: rdp, TOTP_SECRET: totp };
-}
-
-export async function setVaultSecret(name: VaultSecret, value: string): Promise<void> {
-  const distro = (await readConfig()).WSL_DISTRO;
-  const result = await helper(distro, ['set-secret', name], { input: value + '\n', timeoutMs: 20_000 });
-  if (result.code !== 0) {
-    const message = (result.stdout + result.stderr).trim();
-    throw new HttpError(
-      result.code === 2 || /uso:/.test(message) ? 409 : 500,
-      /uso:|desconhecido/.test(message)
-        ? 'O Ubuntu tem os comandos da versão antiga: rode a Instalação (ou "Aplicar no Ubuntu") primeiro.'
-        : message || 'Falha ao gravar no cofre do WSL.',
-    );
+/** On startup: legacy secrets whose rename was pending (e.g. commands updated outside the app). */
+export async function finishPendingMigration(): Promise<void> {
+  try {
+    await migrateLegacySecrets((await getSettings()).distro);
+  } catch {
+    // WSL unavailable: retried after the next install/update.
   }
-  say(`${name === 'VPN_PASSWORD' ? 'Senha da VPN' : 'Senha do RDP'} ${value ? 'salva no' : 'removida do'} cofre do WSL2.`, 'ok');
 }

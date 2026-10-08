@@ -1,4 +1,4 @@
-import type { Config, GatewayMode, SystemInfo, TotpCode, VaultSecret, VaultStatus } from './types';
+import type { AppData, Connection, ConnectionInput, Settings, SystemInfo, TotpCode } from './types';
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -15,27 +15,26 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  config: () => request<{ exists: boolean; values: Config }>('GET', '/config'),
-  saveConfig: (values: Config) => request<{ exists: boolean; values: Config }>('PUT', '/config', values),
-  applyConfig: () => request<{ ok: boolean }>('POST', '/config/apply'),
+  data: () => request<AppData>('GET', '/data'),
+  saveSettings: (settings: Settings) => request<Settings>('PUT', '/settings', settings),
 
   system: () => request<SystemInfo>('GET', '/system'),
-  install: (body: { linuxPassword: string; vpnPassword: string; rdpPassword: string; updateCert: boolean }) =>
-    request<{ ok: boolean; code: number }>('POST', '/system/install', body),
+  install: (linuxPassword: string) => request<{ ok: boolean; code: number }>('POST', '/system/install', { linuxPassword }),
+  updateCommands: () => request<{ ok: boolean }>('POST', '/system/update'),
   installWsl: () => request<{ ok: boolean }>('POST', '/system/install-wsl'),
 
-  vault: () => request<VaultStatus>('GET', '/vault'),
-  setSecret: (name: VaultSecret, value: string) => request<VaultStatus>('PUT', `/vault/${name}`, { value }),
+  createConnection: (input: ConnectionInput) => request<Connection>('POST', '/connections', input),
+  updateConnection: (id: string, input: ConnectionInput) => request<Connection>('PUT', `/connections/${id}`, input),
+  deleteConnection: (id: string) => request<{ ok: boolean }>('DELETE', `/connections/${id}`),
+  detectCertificate: (host: string, port: number) => request<{ fingerprint: string }>('POST', '/certificate', { host, port }),
 
-  connect: (otp: string) => request<{ ok: boolean }>('POST', '/vpn/connect', { otp }),
+  connect: (id: string, otp: string) => request<{ ok: boolean }>('POST', `/connections/${id}/connect`, { otp }),
   disconnect: () => request<{ ok: boolean }>('POST', '/vpn/disconnect'),
-  openRdp: () => request<{ ok: boolean }>('POST', '/rdp/open'),
-  gatewayOn: () => request<{ ok: boolean }>('POST', '/gateway/on'),
-  gatewayOff: () => request<{ ok: boolean }>('POST', '/gateway/off'),
-  setMode: (mode: GatewayMode) => request<{ ok: boolean }>('PUT', '/gateway/mode', { mode }),
+  tunnelOn: (id: string) => request<{ ok: boolean }>('POST', `/connections/${id}/tunnel`),
+  tunnelOff: () => request<{ ok: boolean }>('POST', '/tunnel/off'),
 
-  totp: () => request<TotpCode & { enabled: boolean }>('GET', '/totp'),
+  totp: (id: string) => request<TotpCode & { enabled: boolean }>('GET', `/connections/${id}/totp`),
+  saveTotp: (id: string, secret: string) => request<{ enabled: boolean }>('PUT', `/connections/${id}/totp`, { secret }),
+  removeTotp: (id: string) => request<{ enabled: boolean }>('DELETE', `/connections/${id}/totp`),
   previewTotp: (secret: string) => request<TotpCode & { valid: boolean }>('POST', '/totp/preview', { secret }),
-  saveTotp: (secret: string) => request<{ enabled: boolean }>('PUT', '/totp', { secret }),
-  removeTotp: () => request<{ enabled: boolean }>('DELETE', '/totp'),
 };

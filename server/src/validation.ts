@@ -1,4 +1,4 @@
-import { configKeys, defaultConfig, gatewayModes, splitList, type Config, type ConfigKey } from './config.ts';
+import type { Connection, Settings, Tunnel } from './store.ts';
 
 export class HttpError extends Error {
   status: number;
@@ -10,76 +10,96 @@ export class HttpError extends Error {
 
 export const badRequest = (message: string) => new HttpError(400, message);
 
-// Values end up double-quoted in a file that bash sources and PowerShell parses,
-// and some are interpolated into shell commands, so these characters never get through.
+type Body = Record<string, unknown>;
+
+// Values are passed as arguments to Linux commands and shown in the UI: no control characters,
+// and none of the characters that would matter if a value ever reached a shell.
 const unsafe = /["$`\\\r\n\0]/;
-
 const hostname = /^[A-Za-z0-9.-]+$/;
-const cidr = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
 
-const rules: Partial<Record<ConfigKey, [RegExp, string]>> = {
-  WSL_DISTRO: [/^[A-Za-z0-9._-]+$/, 'Distro inválida (ex.: Ubuntu-24.04)'],
-  LINUX_USER: [/^[a-z_][a-z0-9_-]{0,31}$/, 'Usuário do Linux inválido (minúsculas, números, _ e -)'],
-  VPN_HOST: [hostname, 'Host da VPN inválido'],
-  VPN_TRUSTED_CERT: [/^([0-9a-f]{64})?$/, 'Fingerprint deve ter 64 caracteres hexadecimais (ou ficar vazio)'],
-  VPN_OTP_REQUIRED: [/^[01]$/, 'OTP obrigatório deve ser 0 ou 1'],
-  VPN_OTP_DELAY: [/^([0-9]|[12][0-9]|30)$/, 'Atraso do OTP deve ser de 0 a 30 segundos'],
-  RDP_HOST: [/^([A-Za-z0-9.-]+)?$/, 'Host do RDP inválido'],
-  RDP_RESOLUTION: [/^(fullscreen|\d{3,5}x\d{3,5})$/, 'Resolução deve ser "fullscreen" ou LARGURAxALTURA'],
-};
-
-const labels: Record<ConfigKey, string> = {
-  WSL_DISTRO: 'Distro',
-  LINUX_USER: 'Usuário do Linux',
-  VPN_HOST: 'Host da VPN',
-  VPN_PORT: 'Porta da VPN',
-  VPN_USER: 'Usuário da VPN',
-  VPN_TRUSTED_CERT: 'Fingerprint do certificado',
-  VPN_OTP_REQUIRED: 'OTP obrigatório',
-  VPN_OTP_DELAY: 'Atraso do OTP',
-  RDP_HOST: 'Host do RDP',
-  RDP_USER: 'Usuário do RDP',
-  RDP_DOMAIN: 'Domínio do RDP',
-  RDP_RESOLUTION: 'Resolução do RDP',
-  RDP_EXTRA_OPTS: 'Opções extras do RDP',
-  GATEWAY_ROUTES: 'Redes da empresa',
-  GATEWAY_DNS_SUFFIXES: 'Domínios internos',
-  GATEWAY_MODE: 'Modo inicial',
-};
-
-export function parseConfig(body: Record<string, unknown>): Config {
-  const config = { ...defaultConfig };
-  for (const key of configKeys) {
-    const raw = body[key] ?? defaultConfig[key];
-    if (typeof raw !== 'string') throw badRequest(`${labels[key]} inválido`);
-    const value = raw.trim();
-    if (unsafe.test(value)) throw badRequest(`${labels[key]} não pode conter aspas, $, \` ou \\`);
-    if (value.length > 400) throw badRequest(`${labels[key]} é muito longo`);
-    const rule = rules[key];
-    if (rule && !rule[0].test(value)) throw badRequest(rule[1]);
-    config[key] = value;
-  }
-
-  const port = Number(config.VPN_PORT);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw badRequest('Porta da VPN inválida');
-  if (!config.VPN_HOST || !config.VPN_USER || !config.LINUX_USER) {
-    throw badRequest('Preencha usuário do Linux, host e usuário da VPN');
-  }
-  if (!splitList(config.GATEWAY_ROUTES).every((route) => cidr.test(route))) {
-    throw badRequest('Redes da empresa devem estar no formato 10.0.0.0/8, separadas por espaço');
-  }
-  if (!splitList(config.GATEWAY_DNS_SUFFIXES).every((suffix) => /^\.?[A-Za-z0-9.-]+$/.test(suffix))) {
-    throw badRequest('Domínios internos inválidos (ex.: .empresa.local)');
-  }
-  if (!(gatewayModes as readonly string[]).includes(config.GATEWAY_MODE)) throw badRequest('Modo inicial inválido');
-  return config;
+function text(body: Body, field: string, label: string, { required = false, max = 200, pattern = undefined as RegExp | undefined, patternMessage = '' } = {}): string {
+  const raw = body[field];
+  if (raw !== undefined && raw !== null && typeof raw !== 'string') throw badRequest(`${label} inválido`);
+  const value = (raw ?? '').trim();
+  if (required && !value) throw badRequest(`${label} é obrigatório`);
+  if (value.length > max) throw badRequest(`${label} é muito longo`);
+  if (unsafe.test(value)) throw badRequest(`${label} não pode conter aspas, $, \` ou \\`);
+  if (value && pattern && !pattern.test(value)) throw badRequest(patternMessage || `${label} inválido`);
+  return value;
 }
 
-export function parseGatewayMode(value: unknown) {
-  if (typeof value !== 'string' || !(gatewayModes as readonly string[]).includes(value)) {
-    throw badRequest('Modo inválido');
+function integer(body: Body, field: string, label: string, min: number, max: number, fallback: number): number {
+  const raw = body[field] ?? fallback;
+  const value = typeof raw === 'string' ? Number(raw) : raw;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+    throw badRequest(`${label} deve ser um número de ${min} a ${max}`);
   }
-  return value as (typeof gatewayModes)[number];
+  return value;
+}
+
+export function parseSettings(body: Body): Settings {
+  return {
+    distro: text(body, 'distro', 'Distro', { required: true, pattern: /^[A-Za-z0-9._-]+$/, patternMessage: 'Distro inválida (ex.: Ubuntu-24.04)' }),
+    linuxUser: text(body, 'linuxUser', 'Usuário do Linux', {
+      required: true,
+      max: 32,
+      pattern: /^[a-z_][a-z0-9_-]{0,31}$/,
+      patternMessage: 'Usuário do Linux inválido (minúsculas, números, _ e -)',
+    }),
+  };
+}
+
+const ipv4 = (value: string) => /^(\d{1,3}\.){3}\d{1,3}$/.test(value) && value.split('.').every((part) => Number(part) <= 255);
+
+/**
+ * Normalizes one tunnel target:
+ *   10.0.0.0/8 or 10.1.2.3          -> network (an IP becomes /32)
+ *   https://intranet.company.com/x  -> intranet.company.com (host: resolved via the company DNS and routed)
+ *   *.company.local or .company.local -> *.company.local (domain: only its DNS goes to the company)
+ */
+export function parseTarget(input: string): string {
+  let value = input.trim().toLowerCase();
+  const cidr = /^(\d{1,3}(?:\.\d{1,3}){3})(?:\/(\d{1,2}))?$/.exec(value);
+  if (cidr) {
+    const bits = cidr[2] === undefined ? 32 : Number(cidr[2]);
+    if (!ipv4(cidr[1]) || bits > 32) throw badRequest(`Destino inválido: ${input}`);
+    return `${cidr[1]}/${bits}`;
+  }
+  value = value.replace(/^[a-z][a-z0-9+.-]*:\/\//, '').split(/[/?#]/)[0].replace(/:\d+$/, '');
+  const domain = /^(\*\.|\.)(.+)$/.exec(value);
+  const name = domain ? domain[2] : value;
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(name)) throw badRequest(`Destino inválido: ${input}`);
+  if (ipv4(name)) return `${name}/32`;
+  return domain ? `*.${name}` : name;
+}
+
+function parseTunnel(raw: unknown): Tunnel {
+  const body = (raw && typeof raw === 'object' ? raw : {}) as Body;
+  const rawTargets = Array.isArray(body.targets) ? body.targets : [];
+  if (rawTargets.some((item) => typeof item !== 'string')) throw badRequest('Destinos do túnel inválidos');
+  const targets = [...new Set((rawTargets as string[]).filter((item) => item.trim()).map(parseTarget))];
+  if (targets.length > 200) throw badRequest('Destinos demais (máximo 200)');
+  const tunnel: Tunnel = { enabled: body.enabled === true, global: body.global === true, m365: body.m365 === true, targets };
+  if (tunnel.enabled && !tunnel.global && !tunnel.m365 && !targets.length) {
+    throw badRequest('Adicione destinos ao túnel ou marque "Global"');
+  }
+  return tunnel;
+}
+
+export function parseConnection(body: Body): Omit<Connection, 'id'> {
+  return {
+    name: text(body, 'name', 'Nome', { required: true, max: 60 }),
+    host: text(body, 'host', 'Gateway', { required: true, pattern: hostname, patternMessage: 'Gateway inválido (ex.: vpn.empresa.com.br)' }),
+    port: integer(body, 'port', 'Porta', 1, 65535, 10443),
+    user: text(body, 'user', 'Usuário da VPN', { required: true, max: 120 }),
+    trustedCert: text(body, 'trustedCert', 'Fingerprint', {
+      pattern: /^[0-9a-f]{64}$/,
+      patternMessage: 'Fingerprint deve ter 64 caracteres hexadecimais (ou ficar vazio)',
+    }).toLowerCase(),
+    otpRequired: body.otpRequired !== false,
+    otpDelay: integer(body, 'otpDelay', 'Atraso do OTP', 0, 30, 2),
+    tunnel: parseTunnel(body.tunnel),
+  };
 }
 
 /** A single-line secret: newlines would let it spill into other vault entries. */
@@ -89,4 +109,9 @@ export function parseSecret(value: unknown, label: string): string {
   if (/[\r\n\0]/.test(value)) throw badRequest(`${label} não pode ter quebras de linha`);
   if (value.length > 500) throw badRequest(`${label} é muito longa`);
   return value;
+}
+
+/** undefined keeps the stored secret, "" removes it. */
+export function optionalSecret(value: unknown, label: string): string | undefined {
+  return value === undefined ? undefined : parseSecret(value, label);
 }

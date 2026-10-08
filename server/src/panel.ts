@@ -1,30 +1,20 @@
-import { spawn } from 'node:child_process';
-import { openSync, closeSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { readConfig, splitList, type Config, type GatewayMode } from './config.ts';
 import { runGatewayElevated } from './elevated.ts';
-import { say, sayLines, state, updateState, type GatewayState } from './events.ts';
-import { runPowerShellScript } from './exec.ts';
-import { rdpLogFile, scriptPath } from './paths.ts';
+import { dataChanged, say, sayLines, state, updateState, type TunnelState } from './events.ts';
+import { getConnection, getSettings, type Connection } from './store.ts';
 import { parseTotpSecret, totpNow } from './totp.ts';
 import { HttpError } from './validation.ts';
+import { getSecret, secretName, setSecret } from './vault.ts';
 import { hasTaggedNrptRule, wslGatewayRoutes } from './windowsNet.ts';
-import { helper, wsl } from './wsl.ts';
+import { bash, helper, wslExec } from './wsl.ts';
 
-export const modeText: Record<GatewayMode, string> = {
-  empresa: 'só a rede da empresa',
-  m365: 'rede da empresa + Microsoft 365',
-  tudo: 'TODO o tráfego pela empresa',
-};
-
-/** Runs one action at a time, like the original panel: concurrent VPN/route changes would race. */
+/** Runs one VPN/tunnel action at a time, like the original panel: concurrent route changes would race. */
 async function exclusive<T>(label: string, action: () => Promise<T>): Promise<T> {
   if (state.busy) throw new HttpError(409, `Aguarde: ${state.busy}`);
   updateState({ busy: label });
   try {
     return await action();
   } catch (error) {
-    say(`Erro: ${(error as Error).message}`, 'error');
+    if (!(error instanceof HttpError)) say(`Erro: ${(error as Error).message}`, 'error');
     throw error;
   } finally {
     updateState({ busy: null });
@@ -36,31 +26,29 @@ async function exclusive<T>(label: string, action: () => Promise<T>): Promise<T>
 
 let polling = false;
 
-/** Checks the tunnel (ppp0) and both ends of the Windows gateway, then publishes the result. */
+/** Checks the tunnel (ppp0), which connection is up and both ends of the Windows tunnel. */
 export async function refreshStatus(): Promise<void> {
   if (polling || state.busy) return;
   polling = true;
   try {
-    const config = await readConfig();
+    const { distro } = await getSettings();
     let result;
     try {
-      result = await wsl(
-        config.WSL_DISTRO,
-        [
-          'bash',
-          '-lc',
-          'ip -br addr show ppp0 2>/dev/null; ' +
-            "echo ETH0=$(ip -4 -br addr show eth0 | awk '{print $3}'); " +
-            'echo GW=$(sudo -n vpn-helper gw-status 2>/dev/null)',
-        ],
+      result = await bash(
+        distro,
+        'ip -br addr show ppp0 2>/dev/null; ' +
+          "echo ETH0=$(ip -4 -br addr show eth0 | awk '{print $3}'); " +
+          'echo GW=$(sudo -n /usr/local/sbin/vpn-helper gw-status 2>/dev/null); ' +
+          'echo ACTIVE=$(cat /tmp/vpnwsl.active 2>/dev/null)',
+        [],
         { timeoutMs: 25_000 },
       );
     } catch {
       result = null;
     }
     if (!result || result.code !== 0 || !result.stdout.includes('ETH0=')) {
-      // No answer is not the same as "the VPN dropped": keep the last state, otherwise
-      // the automatic gateway shutdown below would fire for nothing.
+      // No answer is not the same as "the VPN dropped": keep the last state, otherwise the
+      // automatic tunnel shutdown below would fire for nothing.
       updateState({ status: { ...state.status, reachable: false, checkedAt: new Date().toISOString() } });
       return;
     }
@@ -68,27 +56,17 @@ export async function refreshStatus(): Promise<void> {
     let ppp = '';
     const info: Record<string, string> = {};
     for (const line of result.stdout.split(/\r?\n/)) {
-      if (/^(ETH0|GW)=/.test(line)) {
-        const [key, ...value] = line.split('=');
-        info[key] = value.join('=').trim();
-      } else if (line.startsWith('ppp0')) {
-        ppp = line;
-      }
+      const match = /^(ETH0|GW|ACTIVE)=(.*)$/.exec(line);
+      if (match) info[match[1]] = match[2].trim();
+      else if (line.startsWith('ppp0')) ppp = line;
     }
 
-    // The gateway has two ends: rules in Linux and routes/DNS on Windows. One without the
-    // other (e.g. after a reboot, which drops the routes but keeps the NRPT rule) is "partial".
+    // The tunnel has two ends: rules in Linux and routes/DNS on Windows. One without the other
+    // (e.g. after a reboot, which drops the routes but keeps the NRPT rule) is "partial".
     const linuxOn = info.GW === 'on';
     const routes = await wslGatewayRoutes(info.ETH0 ?? '');
     const windowsOn = routes.length > 0 || (await hasTaggedNrptRule());
-    const gateway: GatewayState = linuxOn && windowsOn ? 'on' : linuxOn || windowsOn ? 'partial' : 'off';
-
-    const companyRoutes = splitList(config.GATEWAY_ROUTES).length;
-    const activeMode: GatewayMode = routes.some(([dest, mask]) => dest === '0.0.0.0' && mask === '128.0.0.0')
-      ? 'tudo'
-      : routes.length > companyRoutes
-        ? 'm365'
-        : 'empresa';
+    const tunnel: TunnelState = linuxOn && windowsOn ? 'on' : linuxOn || windowsOn ? 'partial' : 'off';
 
     const up = Boolean(ppp);
     const dropped = state.status.up && !up;
@@ -97,66 +75,62 @@ export async function refreshStatus(): Promise<void> {
         reachable: true,
         up,
         address: up ? (ppp.split(/\s+/)[2] ?? '') : '',
-        gateway,
-        activeMode,
+        activeId: up ? info.ACTIVE || null : null,
+        tunnel,
+        tunnelGlobal: routes.some(([dest, mask]) => dest === '0.0.0.0' && mask === '128.0.0.0'),
+        tunnelRoutes: routes.length,
         checkedAt: new Date().toISOString(),
       },
     });
 
-    if (dropped && gateway !== 'off') {
-      // With the gateway on (especially in "tudo" mode) Windows depends on the tunnel and
-      // would stay offline until someone clicked. Undo it right away.
-      say('A VPN caiu: removendo as rotas do Windows para devolver a sua internet (confirme o UAC)...', 'warn');
-      void gatewayOff().catch(() => undefined);
+    if (dropped && tunnel !== 'off') {
+      // With the tunnel on (especially global) Windows depends on it and would stay offline
+      // until someone clicked. Undo it right away.
+      say('A VPN caiu: removendo o túnel do Windows para devolver a sua internet (confirme o UAC)...', 'warn');
+      void tunnelOff().catch(() => undefined);
     }
   } finally {
     polling = false;
   }
 }
 
-// --------------------------------------------------------------- vault/TOTP
+// ----------------------------------------------------------- authenticator
 
-let cachedTotpKey: string | null | undefined;
+const totpKeys = new Map<string, string | null>();
 
-async function vaultTotpKey(config: Config): Promise<string | null> {
-  if (cachedTotpKey !== undefined) return cachedTotpKey;
-  const result = await helper(config.WSL_DISTRO, ['get', 'TOTP_SECRET'], { timeoutMs: 20_000 });
-  cachedTotpKey = result.code === 0 ? parseTotpSecret(result.stdout) : null;
-  return cachedTotpKey;
+async function totpKey(connectionId: string): Promise<string | null> {
+  if (totpKeys.has(connectionId)) return totpKeys.get(connectionId) ?? null;
+  const { distro } = await getSettings();
+  const key = parseTotpSecret(await getSecret(distro, secretName('TOTP_SECRET', connectionId)));
+  totpKeys.set(connectionId, key);
+  return key;
 }
 
-export async function refreshTotpEnabled(): Promise<void> {
-  try {
-    const key = await vaultTotpKey(await readConfig());
-    updateState({ totpEnabled: key !== null });
-  } catch {
-    // WSL unavailable: leave it unknown.
-  }
+export function forgetTotpKey(connectionId: string): void {
+  totpKeys.delete(connectionId);
 }
 
-export async function currentTotp(): Promise<{ enabled: boolean; code?: string; remaining?: number }> {
-  const key = await vaultTotpKey(await readConfig());
+/** Live code of a connection's authenticator, computed with the Windows clock. */
+export async function currentTotp(connectionId: string): Promise<{ enabled: boolean; code?: string; remaining?: number }> {
+  const key = await totpKey(connectionId);
   return key ? { enabled: true, ...totpNow(key) } : { enabled: false };
 }
 
-/** Saves the authenticator key in the vault ("" removes it). */
-export async function saveTotp(secret: string): Promise<void> {
-  const config = await readConfig();
-  const result = await helper(config.WSL_DISTRO, ['set-totp'], { input: secret + '\n', timeoutMs: 20_000 });
-  if (result.code !== 0) {
-    throw new HttpError(500, (result.stdout + result.stderr).trim() || 'Falha ao gravar no cofre do WSL.');
-  }
-  cachedTotpKey = secret || null;
-  updateState({ totpEnabled: Boolean(secret) });
-  say(secret ? 'Autenticador salvo no cofre do WSL2.' : 'Autenticador removido.', 'ok');
+/** Saves a connection's authenticator key in the vault ("" removes it). */
+export async function saveTotp(connectionId: string, key: string): Promise<void> {
+  const { distro } = await getSettings();
+  await setSecret(distro, secretName('TOTP_SECRET', connectionId), key);
+  totpKeys.set(connectionId, key || null);
+  say(key ? 'Autenticador salvo no cofre do WSL2.' : 'Autenticador removido.', 'ok');
+  dataChanged();
 }
 
-async function totpCodeForConnect(config: Config): Promise<string | null> {
-  const key = await vaultTotpKey(config);
+async function totpCodeForConnect(connectionId: string): Promise<string | null> {
+  const key = await totpKey(connectionId);
   if (!key) return null;
   let { code, remaining } = totpNow(key);
-  // vpn-up still waits VPN_OTP_DELAY before sending the code; near the end of the 30 s
-  // window it would reach the gateway already expired.
+  // vpn-up still waits the OTP delay before sending the code; near the end of the 30 s window
+  // it would reach the gateway already expired.
   if (remaining < 8) {
     say(`Aguardando ${remaining}s pelo próximo código...`);
     await new Promise((resolve) => setTimeout(resolve, (remaining + 1) * 1000));
@@ -168,50 +142,108 @@ async function totpCodeForConnect(config: Config): Promise<string | null> {
 
 // --------------------------------------------------------------- connection
 
-export async function connect(typedOtp: string): Promise<void> {
-  const config = await readConfig();
+export async function connect(connectionId: string, typedOtp: string): Promise<void> {
+  const connection = await getConnection(connectionId);
+  const { distro } = await getSettings();
+  if (state.status.up) throw new HttpError(409, 'Já existe uma VPN conectada: desconecte antes.');
   // Digits only: spaces or a BOM pasted with the code make the gateway reject a valid token.
   let otp = typedOtp.replace(/\D/g, '');
-  const otpRequired = config.VPN_OTP_REQUIRED === '1';
-  if (otpRequired && !otp && !state.totpEnabled) throw new HttpError(400, 'Informe o código OTP do autenticador.');
 
-  await exclusive('Conectando', async () => {
-    say(`Conectando a ${config.VPN_HOST}...`, 'step');
-    // A typed code wins; otherwise the authenticator generates one.
-    if (otpRequired && !otp && state.totpEnabled) {
-      const generated = await totpCodeForConnect(config);
+  await exclusive(`Conectando ${connection.name}`, async () => {
+    say(`Conectando a ${connection.name} (${connection.host})...`, 'step');
+    // A typed code wins; when the field is empty the registered authenticator fills it in.
+    if (connection.otpRequired && !otp) {
+      const generated = await totpCodeForConnect(connection.id);
       if (!generated) {
-        say('Não consegui gerar o código: recadastre o autenticador.', 'error');
+        say('Informe o código OTP ou cadastre o autenticador desta conexão.', 'error');
         return;
       }
       otp = generated;
     }
     // The password comes from the vault inside WSL; only the OTP travels through stdin.
-    const result = await wsl(config.WSL_DISTRO, ['vpn-up'], { input: otp + '\n', timeoutMs: 150_000 });
+    const result = await wslExec(
+      distro,
+      [
+        'vpn-up',
+        connection.id,
+        connection.host,
+        String(connection.port),
+        connection.user,
+        connection.trustedCert,
+        connection.otpRequired ? '1' : '0',
+        String(connection.otpDelay),
+      ],
+      { input: otp + '\n', timeoutMs: 150_000 },
+    );
     sayLines(result.stdout + result.stderr);
-    if (result.code === null || result.code < 0) say('Tempo esgotado ao conectar.', 'error');
+    if (result.code < 0) say('Tempo esgotado ao conectar.', 'error');
+    if (result.code === 0 && connection.tunnel.enabled) await tunnelOnSteps(connection, distro);
   });
 }
 
 export async function disconnect(): Promise<void> {
-  const config = await readConfig();
+  const { distro } = await getSettings();
   await exclusive('Desconectando', async () => {
     say('Desconectando...', 'step');
-    if (state.status.gateway !== 'off') {
-      // Without the tunnel, the Windows routes would point at nothing.
-      say('Removendo antes as rotas e DNS do Windows (confirme o UAC)...');
-      if (!(await gatewayOffSteps(config))) say("Aviso: rotas do Windows mantidas; use 'Limpar' depois.", 'warn');
+    if (state.status.tunnel !== 'off') {
+      // Without the VPN, the Windows routes would point at nothing.
+      say('Removendo antes o túnel do Windows (confirme o UAC)...');
+      if (!(await tunnelOffSteps(distro))) say("Aviso: rotas do Windows mantidas; use 'Limpar túnel' depois.", 'warn');
     }
-    const result = await wsl(config.WSL_DISTRO, ['vpn-down'], { timeoutMs: 90_000 });
+    const result = await wslExec(distro, ['vpn-down'], { timeoutMs: 90_000 });
     sayLines(result.stdout + result.stderr);
   });
 }
 
-// ------------------------------------------------------------------ gateway
+// ------------------------------------------------------------------ tunnel
 
-async function gatewayOnSteps(config: Config, mode: GatewayMode): Promise<boolean> {
+/** Resolves host names inside WSL, i.e. through the company DNS while the VPN is up. */
+async function resolveInWsl(distro: string, hosts: string[]): Promise<Map<string, string[]>> {
+  const resolved = new Map<string, string[]>();
+  if (!hosts.length) return resolved;
+  const result = await bash(
+    distro,
+    'for h in "$@"; do getent ahostsv4 "$h" | awk -v h="$h" \'{print h, $1}\' | sort -u; done',
+    hosts,
+    { timeoutMs: 60_000 },
+  );
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const [host, ip] = line.trim().split(/\s+/);
+    if (host && ip) resolved.set(host, [...(resolved.get(host) ?? []), ip]);
+  }
+  return resolved;
+}
+
+async function tunnelOnSteps(connection: Connection, distro: string): Promise<boolean> {
+  const { tunnel } = connection;
+  const networks = tunnel.targets.filter((t) => /^\d/.test(t));
+  const hosts = tunnel.targets.filter((t) => !/^\d/.test(t) && !t.startsWith('*.'));
+  const domains = tunnel.targets.filter((t) => t.startsWith('*.')).map((t) => `.${t.slice(2)}`);
+  const mode = tunnel.global ? 'tudo' : tunnel.m365 ? 'm365' : 'empresa';
+  say(
+    `Adicionando o túnel no Windows: ${tunnel.global ? 'todo o tráfego' : `${tunnel.targets.length} destino(s)`}${tunnel.m365 && !tunnel.global ? ' + Microsoft 365' : ''} (confirme o UAC)...`,
+    'step',
+  );
+
+  // Host names are routed by IP: resolve them now, through the company DNS.
+  const resolved = await resolveInWsl(distro, hosts);
+  for (const host of hosts) {
+    const ips = resolved.get(host);
+    if (ips?.length) {
+      networks.push(...ips.map((ip) => `${ip}/32`));
+      say(`${host} -> ${ips.join(', ')}`);
+    } else {
+      say(`Aviso: ${host} não resolveu; ficou de fora das rotas.`, 'warn');
+    }
+  }
+  const routes = [...new Set(networks)];
+  if (!routes.length && mode === 'empresa') {
+    say('Nenhum destino do túnel pôde ser roteado.', 'error');
+    return false;
+  }
+
   // Linux first (forwarding + NAT), then routes and DNS on Windows.
-  const result = await helper(config.WSL_DISTRO, ['gw-on'], { timeoutMs: 30_000 });
+  const result = await helper(distro, ['gw-on'], { timeoutMs: 30_000 });
   const info = Object.fromEntries(
     result.stdout
       .split(/\r?\n/)
@@ -223,122 +255,71 @@ async function gatewayOnSteps(config: Config, mode: GatewayMode): Promise<boolea
     return false;
   }
 
-  const params = ['-Action', 'On', '-WslIp', info.WSL_IP, '-Routes', splitList(config.GATEWAY_ROUTES).join(',')];
-  // An empty parameter disappears in Start-Process and shifts the following ones.
+  // Empty parameters disappear in Start-Process and shift the following ones: only pass what exists.
+  const params = ['-Action', 'On', '-WslIp', info.WSL_IP, '-Mode', mode];
+  if (routes.length) params.push('-Routes', routes.join(','));
   if (info.DNS) params.push('-Dns', info.DNS);
-  const suffixes = splitList(config.GATEWAY_DNS_SUFFIXES).join(',');
-  if (suffixes) params.push('-Suffixes', suffixes);
-  params.push('-Mode', mode);
-  if (mode !== 'empresa') params.push('-VpnHost', config.VPN_HOST);
+  // Internal names must resolve on Windows too: whole domains plus each exact host name.
+  const namespaces = [...domains, ...hosts];
+  if (namespaces.length) params.push('-Suffixes', namespaces.join(','));
+  if (mode !== 'empresa') params.push('-VpnHost', connection.host);
 
-  const previous = state.status.gateway;
+  const previous = state.status.tunnel;
   const { ok, lines } = await runGatewayElevated(params);
   lines.forEach((line) => say(line));
   if (!ok) {
-    // gateway.ps1 validates everything before touching Windows, so only undo Linux
-    // when Windows wasn't already using the tunnel.
-    if (previous === 'off') await helper(config.WSL_DISTRO, ['gw-off'], { timeoutMs: 30_000 });
+    // gateway.ps1 validates everything before touching Windows, so only undo Linux when
+    // Windows wasn't already using the tunnel.
+    if (previous === 'off') await helper(distro, ['gw-off'], { timeoutMs: 30_000 });
     return false;
   }
-  say(`Windows: ${modeText[mode]}.`, 'ok');
+  say(tunnel.global ? 'Túnel ativo: todo o tráfego do Windows passa pela VPN.' : 'Túnel ativo no Windows.', 'ok');
   if (mode !== 'empresa') say('Feche o Teams por completo e abra de novo para ele reconectar.');
   return true;
 }
 
-async function gatewayOffSteps(config: Config): Promise<boolean> {
+async function tunnelOffSteps(distro: string): Promise<boolean> {
   // Windows first: if the UAC prompt is denied, the routes keep working.
   const { ok, lines } = await runGatewayElevated(['-Action', 'Off']);
   lines.forEach((line) => say(line));
   if (!ok) return false;
-  await helper(config.WSL_DISTRO, ['gw-off'], { timeoutMs: 30_000 });
-  say('Windows fora da rede corporativa.', 'ok');
+  await helper(distro, ['gw-off'], { timeoutMs: 30_000 });
+  say('Túnel removido: Windows fora da rede corporativa.', 'ok');
   return true;
 }
 
-export async function gatewayOn(): Promise<void> {
-  const config = await readConfig();
-  const mode = state.selectedMode;
-  await exclusive('Ligando a VPN no Windows', async () => {
-    say(`Ligando a VPN no Windows: ${modeText[mode]} (confirme o UAC)...`, 'step');
-    await gatewayOnSteps(config, mode);
-  });
-}
-
-export async function gatewayOff(): Promise<void> {
-  const config = await readConfig();
-  await exclusive('Removendo rotas do Windows', async () => {
-    say('Removendo rotas e DNS do Windows (confirme o UAC)...', 'step');
-    await gatewayOffSteps(config);
-  });
-}
-
-/** Changes the mode; with the gateway on it is reapplied right away. */
-export async function setGatewayMode(mode: GatewayMode): Promise<void> {
-  updateState({ selectedMode: mode });
-  if (state.status.gateway === 'on' && !state.busy) await gatewayOn();
-}
-
-// ---------------------------------------------------------------------- RDP
-
-/** Brings the FreeRDP window forward once it exists: it is born behind every other window. */
-async function raiseRdpWindow(host: string): Promise<boolean> {
-  const result = await runPowerShellScript(scriptPath('raise-window.ps1'), ['-Match', host], {
-    timeoutMs: 150_000,
-  });
-  return result.stdout.includes('OK');
-}
-
-async function rdpLogTail(limit = 12): Promise<string[]> {
-  let lines: string[];
-  try {
-    lines = (await readFile(rdpLogFile(), 'utf8')).split(/\r?\n/).filter((line) => line.trim());
-  } catch (error) {
-    return [`(não consegui ler ${rdpLogFile()}: ${(error as Error).message})`];
+/** Adds the tunnel of the connected connection (or of the given one). */
+export async function tunnelOn(connectionId: string): Promise<void> {
+  const connection = await getConnection(connectionId);
+  const { distro } = await getSettings();
+  if (!state.status.up) throw new HttpError(409, 'Conecte a VPN antes de adicionar o túnel.');
+  if (!connection.tunnel.global && !connection.tunnel.m365 && !connection.tunnel.targets.length) {
+    throw new HttpError(400, 'Configure o túnel na conexão (Editar > Adicionar túnel).');
   }
-  if (!lines.length) return ['(vazio - o rdp-connect não chegou a escrever nada)'];
-  // FreeRDP is very verbose; the known noise only gets in the way.
-  const noise = ['set_termianl_nonblock', 'load_map_from_xkbfile', 'no RDP scancode found'];
-  const useful = lines.filter((line) => !noise.some((item) => line.includes(item)));
-  return (useful.length ? useful : lines).slice(-limit);
+  await exclusive('Adicionando o túnel', () => tunnelOnSteps(connection, distro));
 }
 
-/**
- * Opens RDP in a separate, detached process: closing or reopening it never drops the VPN.
- * Always a clean session: ends the previous one and restarts the WSLg graphics host first,
- * since after sleep/resume it can create windows that never get painted.
- */
-export async function openRdp(): Promise<void> {
-  const config = await readConfig();
-  if (!config.RDP_HOST) throw new HttpError(400, 'Preencha o host e o usuário do RDP em Configurações.');
-  if (state.rdpOpening) throw new HttpError(409, 'O RDP já está abrindo.');
-  updateState({ rdpOpening: true });
-  say(`Abrindo RDP: ${config.RDP_HOST} (aguarde a janela)`, 'step');
-  try {
-    await wsl(config.WSL_DISTRO, ['pkill', '-x', 'xfreerdp3'], { timeoutMs: 15_000 });
-    const reset = await runPowerShellScript(scriptPath('wslg-reset.ps1'), [], { timeoutMs: 45_000 });
-    if (!reset.stdout.includes('OK')) say('Aviso: o host gráfico do WSLg demorou a voltar.', 'warn');
-    // Gives the new msrdc time to finish connecting to WSLg before a window is created.
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+export async function tunnelOff(): Promise<void> {
+  const { distro } = await getSettings();
+  await exclusive('Removendo o túnel', async () => {
+    say('Removendo o túnel do Windows (confirme o UAC)...', 'step');
+    await tunnelOffSteps(distro);
+  });
+}
 
-    const logFd = openSync(rdpLogFile(), 'w');
-    try {
-      spawn('wsl.exe', ['-d', config.WSL_DISTRO, '--', 'rdp-connect'], {
-        detached: true,
-        windowsHide: true,
-        stdio: ['ignore', logFd, logFd],
-        env: { ...process.env, WSL_UTF8: '1' },
-      }).unref();
-    } finally {
-      closeSync(logFd);
-    }
+// --------------------------------------------------------------- certificate
 
-    if (await raiseRdpWindow(config.RDP_HOST)) {
-      say('Sessão RDP em primeiro plano.', 'ok');
-    } else {
-      say('A janela do RDP não apareceu. Saída do rdp-connect:', 'error');
-      for (const line of await rdpLogTail()) say(`  ${line}`);
-    }
-  } finally {
-    updateState({ rdpOpening: false });
-  }
+/** SHA-256 fingerprint of the gateway certificate, fetched from inside WSL. */
+export async function detectCertificate(host: string, port: number): Promise<string> {
+  const { distro } = await getSettings();
+  const result = await bash(
+    distro,
+    'echo | timeout 15 openssl s_client -connect "$1:$2" -servername "$1" 2>/dev/null | ' +
+      "openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g' | tr 'A-Z' 'a-z'",
+    [host, String(port)],
+    { timeoutMs: 40_000 },
+  );
+  const fingerprint = result.stdout.replace(/\s/g, '');
+  if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw new HttpError(502, `Não consegui obter o certificado de ${host}:${port}.`);
+  return fingerprint;
 }

@@ -1,5 +1,3 @@
-import type { GatewayMode } from './config.ts';
-
 export type LogLevel = 'info' | 'step' | 'ok' | 'warn' | 'error';
 
 export interface LogEntry {
@@ -9,7 +7,7 @@ export interface LogEntry {
   text: string;
 }
 
-export type GatewayState = 'off' | 'on' | 'partial';
+export type TunnelState = 'off' | 'on' | 'partial';
 
 export interface VpnStatus {
   /** False when WSL didn't answer the last check; the other fields keep the last known values. */
@@ -17,23 +15,22 @@ export interface VpnStatus {
   up: boolean;
   /** ppp0 address while connected. */
   address: string;
-  gateway: GatewayState;
-  /** Mode currently applied on Windows, deduced from its routes. */
-  activeMode: GatewayMode;
+  /** Connection started by the app (null when connected some other way). */
+  activeId: string | null;
+  /** Windows using the tunnel: both ends on, both off, or leftovers of one end ("partial"). */
+  tunnel: TunnelState;
+  tunnelGlobal: boolean;
+  tunnelRoutes: number;
   checkedAt: string | null;
 }
 
 export interface PanelState {
   status: VpnStatus;
-  /** Label of the action in progress; other actions are refused meanwhile. */
+  /** Label of the VPN/tunnel action in progress; other such actions are refused meanwhile. */
   busy: string | null;
-  rdpOpening: boolean;
-  totpEnabled: boolean | null;
-  /** Mode the next "use the VPN on Windows" applies. */
-  selectedMode: GatewayMode;
 }
 
-type Listener = (event: 'state' | 'log', data: unknown) => void;
+type Listener = (event: 'state' | 'log' | 'data', data: unknown) => void;
 
 const maxLog = 500;
 let nextId = 1;
@@ -41,11 +38,17 @@ const log: LogEntry[] = [];
 const listeners = new Set<Listener>();
 
 export const state: PanelState = {
-  status: { reachable: false, up: false, address: '', gateway: 'off', activeMode: 'empresa', checkedAt: null },
+  status: {
+    reachable: false,
+    up: false,
+    address: '',
+    activeId: null,
+    tunnel: 'off',
+    tunnelGlobal: false,
+    tunnelRoutes: 0,
+    checkedAt: null,
+  },
   busy: null,
-  rdpOpening: false,
-  totpEnabled: null,
-  selectedMode: 'empresa',
 };
 
 function classify(text: string): LogLevel {
@@ -70,6 +73,11 @@ export function sayLines(output: string): void {
 export function updateState(patch: Partial<PanelState>): void {
   Object.assign(state, patch);
   for (const listener of listeners) listener('state', state);
+}
+
+/** Tells the UI that connections or vault flags changed and must be reloaded. */
+export function dataChanged(): void {
+  for (const listener of listeners) listener('data', null);
 }
 
 export function subscribe(listener: Listener): () => void {

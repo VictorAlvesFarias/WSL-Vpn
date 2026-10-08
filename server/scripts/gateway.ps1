@@ -17,12 +17,12 @@
 .PARAMETER Dns
   Corporate DNS servers, comma separated (On).
 .PARAMETER Routes
-  Networks routed through WSL2, separated by commas or spaces (On).
+  Networks routed through WSL2, separated by commas or spaces (On). May be empty with -Mode tudo/m365.
 .PARAMETER Suffixes
-  Domains resolved by the corporate DNS, e.g. .company (On).
+  Domains (.company) or exact host names resolved by the corporate DNS (On).
 .PARAMETER Mode
   What goes through the tunnel (On):
-    empresa  only the -Routes networks;
+    empresa  only the -Routes networks (the connection's tunnel targets);
     m365     + the official Microsoft 365 ranges (Teams, SharePoint/OneDrive, Outlook, login) -
              Microsoft then sees the company IP;
     tudo     all IPv4 traffic (0.0.0.0/1 + 128.0.0.0/1). The local network and the home
@@ -120,7 +120,8 @@ try {
         # current state: a failure here leaves the gateway as it was.
         if ($WslIp -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "IP do WSL invalido: '$WslIp'" }
         $prefixes = @(Split-List $Routes)
-        if (-not $prefixes) { throw "Nenhuma rede da empresa configurada." }
+        # Global ("tudo") and Microsoft 365 bring their own ranges; otherwise something is needed.
+        if (-not $prefixes -and $Mode -eq "empresa") { throw "Nenhum destino para o tunel." }
         $companyCount = $prefixes.Count
         if ($Mode -eq "m365") { $prefixes = @($prefixes + (Get-M365Prefixes) | Sort-Object -Unique) }
         # Two halves instead of 0.0.0.0/0: they beat the default route by being more specific,
@@ -159,7 +160,7 @@ try {
             New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $ifIndex -NextHop $WslIp `
                 -RouteMetric 5 -PolicyStore ActiveStore | Out-Null
         }
-        $out.Add("rotas da empresa: $companyCount -> $WslIp ($((Split-List $Routes) -join ', '))")
+        if ($companyCount) { $out.Add("destinos: $companyCount -> $WslIp ($((Split-List $Routes) -join ', '))") }
         if ($Mode -eq "m365") { $out.Add("rotas do Microsoft 365: $($prefixes.Count - $companyCount) -> $WslIp") }
         if ($Mode -eq "tudo") { $out.Add("todo o trafego -> $WslIp (rede local e DNS do roteador continuam em casa)") }
 

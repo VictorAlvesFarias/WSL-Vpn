@@ -14,9 +14,6 @@ export function configurePaths(overrides: Partial<typeof paths>): void {
   Object.assign(paths, overrides);
 }
 
-export const configFile = () => join(paths.dataDir, 'config.env');
 export const scriptPath = (name: string) => join(paths.scriptsDir, name);
-/** Output of the detached rdp-connect process; rewritten on every attempt. */
-export const rdpLogFile = () => join(tmpdir(), 'wsl-vpn-rdp.log');
 /** gateway.ps1 runs elevated and can't hand its output back, so it writes it here. */
 export const gatewayResultFile = () => join(tmpdir(), 'wsl-vpn-gateway.txt');

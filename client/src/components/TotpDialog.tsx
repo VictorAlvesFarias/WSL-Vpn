@@ -1,158 +1,129 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import type { TotpCode } from '../types';
+import type { Connection, TotpCode } from '../types';
 import { Icon } from './Icon';
+import { Modal } from './Modal';
 
 interface TotpDialogProps {
-  enabled: boolean;
+  connection: Connection;
   onClose: () => void;
   onError: (message: string) => void;
 }
 
 /**
- * Registers the authenticator key in the WSL vault. The live code (from the typed key, or from
- * the stored one) is shown so it can be compared with the phone app before trusting it.
+ * Registers a connection's authenticator key in the WSL vault. The live code of the typed key
+ * is shown so it can be compared with the phone app before saving.
  */
-export function TotpDialog({ enabled, onClose, onError }: TotpDialogProps) {
+export function TotpDialog({ connection, onClose, onError }: TotpDialogProps) {
   const [secret, setSecret] = useState('');
   const [show, setShow] = useState(false);
-  const [live, setLive] = useState<TotpCode & { source?: 'typed' | 'stored'; invalid?: boolean }>({});
+  const [preview, setPreview] = useState<(TotpCode & { valid: boolean }) | null>(null);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function tick() {
-      try {
-        if (secret.trim()) {
-          const preview = await api.previewTotp(secret);
-          if (!cancelled) setLive(preview.valid ? { ...preview, source: 'typed' } : { invalid: true });
-        } else if (enabled) {
-          const stored = await api.totp();
-          if (!cancelled) setLive(stored.enabled ? { ...stored, source: 'stored' } : {});
-        } else if (!cancelled) {
-          setLive({});
-        }
-      } catch {
-        if (!cancelled) setLive({});
-      }
+    if (!secret.trim()) {
+      setPreview(null);
+      return;
     }
+    let cancelled = false;
+    const tick = () => api.previewTotp(secret).then((result) => !cancelled && setPreview(result), () => undefined);
     void tick();
     const timer = setInterval(tick, 1000);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [secret, enabled]);
+  }, [secret]);
 
   async function save() {
     setSaving(true);
-    setMessage(null);
     try {
-      await api.saveTotp(secret);
-      setSecret('');
-      setMessage({ kind: 'ok', text: 'Salvo. O código acima é o que o app vai usar ao conectar.' });
+      await api.saveTotp(connection.id, secret);
+      onClose();
     } catch (error) {
-      setMessage({ kind: 'error', text: (error as Error).message });
-    } finally {
+      onError((error as Error).message);
       setSaving(false);
     }
   }
 
   async function remove() {
-    if (!confirm('Remover o autenticador cadastrado?\nO código OTP voltará a ser digitado.')) return;
+    if (!confirm(`Remover o autenticador de ${connection.name}?\nO código OTP voltará a ser digitado.`)) return;
     try {
-      await api.removeTotp();
-      setMessage({ kind: 'ok', text: 'Autenticador removido.' });
+      await api.removeTotp(connection.id);
+      onClose();
     } catch (error) {
       onError((error as Error).message);
     }
   }
 
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="modal card">
-        <header className="modal-head">
-          <h2>Autenticador (OTP)</h2>
-          <button className="icon-button" onClick={onClose} title="Fechar">
-            <Icon name="x" />
-          </button>
-        </header>
-
-        <p className="muted">
-          {enabled
-            ? 'Cadastrado: o app gera o código sozinho ao conectar. Para trocar, cole uma chave nova e salve.'
-            : 'Nenhum cadastrado: o código é digitado a cada conexão.'}
-        </p>
-
-        <label className="field">
-          <span>Chave secreta ou link otpauth://</span>
-          <div className="input-with-actions">
-            <input
-              type={show ? 'text' : 'password'}
-              value={secret}
-              onChange={(event) => setSecret(event.target.value)}
-              autoComplete="off"
-              autoFocus
-              placeholder="JBSWY3DPEHPK3PXP…"
-            />
-            <button type="button" className="icon-button" onClick={() => setShow(!show)} title="Mostrar">
-              <Icon name={show ? 'eyeOff' : 'eye'} />
-            </button>
-          </div>
-        </label>
-
-        <div className="totp-live">
-          {live.code ? (
-            <>
-              <code className="totp-code">
-                {live.code.slice(0, 3)} {live.code.slice(3)}
-              </code>
-              <div className="totp-bar">
-                <div style={{ width: `${((live.remaining ?? 0) / 30) * 100}%` }} />
-              </div>
-              <span className="muted small">
-                Confira com o app do celular ({live.source === 'typed' ? 'chave digitada' : 'chave cadastrada'}) ·{' '}
-                {live.remaining}s
-              </span>
-            </>
-          ) : live.invalid ? (
-            <span className="error-text small">Chave inválida: use base32 (A-Z, 2-7) ou um link otpauth://.</span>
-          ) : (
-            <span className="muted small">Cole a chave para ver o código ao vivo.</span>
-          )}
-        </div>
-
-        <p className="hint warn-text small">
-          <Icon name="alert" size={13} /> Com a chave no mesmo PC que a senha, quem tiver acesso a este Windows conecta
-          sem o seu celular. Confira se a política da empresa permite.
-        </p>
-
-        {message && <p className={message.kind === 'ok' ? 'form-ok' : 'form-error'}>{message.text}</p>}
-
-        <footer className="modal-actions">
-          {enabled && (
-            <button className="button ghost danger-text" onClick={remove}>
+    <Modal
+      title={`Autenticador · ${connection.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          {connection.hasTotp && (
+            <button type="button" className="button ghost danger-text" onClick={remove}>
               <Icon name="trash" />
               Remover
             </button>
           )}
           <span className="spacer" />
-          <button className="button ghost" onClick={onClose}>
-            Fechar
+          <button type="button" className="button ghost" onClick={onClose}>
+            Cancelar
           </button>
-          <button className="button primary" onClick={save} disabled={saving || !live.code || live.source !== 'typed'}>
+          <button type="button" className="button primary" onClick={save} disabled={saving || !preview?.valid}>
             <Icon name="save" />
             {saving ? 'Salvando…' : 'Salvar'}
           </button>
-        </footer>
+        </>
+      }
+    >
+      <p className="muted">
+        {connection.hasTotp
+          ? 'Já cadastrado. Para trocar, cole a nova chave e salve.'
+          : 'Cole a chave secreta do autenticador (a mesma do app do celular). O código passa a aparecer na tela inicial e é usado sozinho quando o campo OTP fica vazio.'}
+      </p>
+
+      <label className="field">
+        <span>Chave secreta ou link otpauth://</span>
+        <div className="input-with-actions">
+          <input
+            type={show ? 'text' : 'password'}
+            value={secret}
+            onChange={(event) => setSecret(event.target.value)}
+            autoComplete="off"
+            autoFocus
+            placeholder="JBSWY3DPEHPK3PXP…"
+          />
+          <button type="button" className="icon-button" onClick={() => setShow(!show)} title="Mostrar">
+            <Icon name={show ? 'eyeOff' : 'eye'} />
+          </button>
+        </div>
+      </label>
+
+      <div className="totp-live">
+        {preview?.valid && preview.code ? (
+          <>
+            <code className="totp-code">
+              {preview.code.slice(0, 3)} {preview.code.slice(3)}
+            </code>
+            <div className="totp-bar">
+              <div style={{ width: `${((preview.remaining ?? 0) / 30) * 100}%` }} />
+            </div>
+            <span className="muted small">Confira com o app do celular · {preview.remaining}s</span>
+          </>
+        ) : preview && !preview.valid ? (
+          <span className="error-text small">Chave inválida: use base32 (A-Z, 2-7) ou um link otpauth://.</span>
+        ) : (
+          <span className="muted small">Cole a chave para ver o código ao vivo.</span>
+        )}
       </div>
-    </div>
+
+      <p className="hint warn-text small">
+        <Icon name="alert" size={13} /> Com a chave no mesmo PC que a senha, quem tiver acesso a este Windows conecta sem o seu
+        celular. Confira se a política da empresa permite.
+      </p>
+    </Modal>
   );
 }

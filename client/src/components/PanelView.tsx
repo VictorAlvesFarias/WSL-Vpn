@@ -1,160 +1,153 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { modeLabels, modeText, type Config, type GatewayMode, type LogEntry, type PanelState } from '../types';
+import type { AppData, Connection, LogEntry, PanelState } from '../types';
+import { ConnectionForm } from './ConnectionForm';
+import { ConnectionPanel } from './ConnectionPanel';
 import { Icon } from './Icon';
 import { LogView } from './LogView';
 import { TotpDialog } from './TotpDialog';
 
 interface PanelViewProps {
+  data: AppData;
   state: PanelState;
-  config: Config | null;
   log: LogEntry[];
-  onError: (message: string) => void;
+  onChanged: () => void;
+  onNotify: (kind: 'ok' | 'error', message: string) => void;
 }
 
-export function PanelView({ state, config, log, onError }: PanelViewProps) {
-  const [otp, setOtp] = useState('');
-  const [totpOpen, setTotpOpen] = useState(false);
-  const { status, busy, rdpOpening, totpEnabled, selectedMode } = state;
+type Dialog = { kind: 'connection'; connection: Connection | null } | { kind: 'totp'; connection: Connection };
 
-  const otpRequired = config?.VPN_OTP_REQUIRED === '1';
-  // With an authenticator registered the code is generated automatically.
-  const needsOtp = otpRequired && !status.up && !totpEnabled;
+const selectedKey = 'wsl-vpn:selected';
 
-  async function run(action: () => Promise<unknown>) {
+function rememberedSelection(): string | null {
+  try {
+    return localStorage.getItem(selectedKey);
+  } catch {
+    return null;
+  }
+}
+
+export function PanelView({ data, state, log, onChanged, onNotify }: PanelViewProps) {
+  const [selectedId, setSelectedId] = useState<string | null>(rememberedSelection);
+  const [dialog, setDialog] = useState<Dialog | null>(null);
+  const { connections, vaultReady } = data;
+  const { status } = state;
+  const notifyError = (message: string) => onNotify('error', message);
+
+  const active = connections.find((c) => c.id === status.activeId && status.up);
+  const selected = connections.find((c) => c.id === selectedId) ?? active ?? connections[0] ?? null;
+
+  useEffect(() => {
     try {
-      await action();
+      if (selected) localStorage.setItem(selectedKey, selected.id);
+    } catch {
+      // Storage unavailable: the selection just isn't remembered.
+    }
+  }, [selected?.id]);
+
+  async function remove(connection: Connection) {
+    if (!confirm(`Excluir "${connection.name}"? A senha e o autenticador dela no cofre também são apagados.`)) return;
+    try {
+      await api.deleteConnection(connection.id);
+      onNotify('ok', `"${connection.name}" excluída`);
+      onChanged();
     } catch (error) {
-      onError((error as Error).message);
+      notifyError((error as Error).message);
     }
   }
 
-  function connect(event?: FormEvent) {
-    event?.preventDefault();
-    const code = otp;
-    setOtp('');
-    void run(() => api.connect(code));
-  }
-
-  const statusKind = busy ? 'busy' : !status.reachable && status.checkedAt ? 'unknown' : status.up ? 'up' : 'down';
-  const statusLabel = busy
-    ? `${busy}…`
-    : statusKind === 'unknown'
-      ? 'WSL não respondeu'
-      : !status.checkedAt
-        ? 'Verificando…'
-        : status.up
-          ? 'Conectada'
-          : 'Desconectada';
-
-  const gatewayButton =
-    status.gateway === 'on'
-      ? { label: 'Parar de usar a VPN no Windows', className: 'button warn', action: api.gatewayOff }
-      : status.gateway === 'partial'
-        ? { label: 'Limpar rotas do Windows', className: 'button warn', action: api.gatewayOff }
-        : { label: 'Usar a VPN no Windows', className: 'button', action: api.gatewayOn };
-
-  const gatewayLabel =
-    status.gateway === 'on'
-      ? { text: `Windows: ${modeText[status.activeMode]}`, className: status.activeMode === 'tudo' ? 'warn-text' : 'ok-text' }
-      : status.gateway === 'partial'
-        ? { text: 'Restos de rotas/DNS no Windows', className: 'warn-text' }
-        : { text: 'Windows fora da rede corporativa', className: 'muted' };
+  const newConnection = () => setDialog({ kind: 'connection', connection: null });
 
   return (
-    <div className="panel-grid">
-      <div className="panel-controls">
-        <section className={`card status-card ${statusKind}`}>
-          <div className="status-row">
-            <span className={`dot ${statusKind}`} />
-            <strong className="status-label">{statusLabel}</strong>
-          </div>
-          <code className="status-address">{status.up ? `ppp0  ${status.address}` : ' '}</code>
-          <span className={`small ${gatewayLabel.className}`}>{gatewayLabel.text}</span>
-        </section>
-
-        {needsOtp && (
-          <form className="otp" onSubmit={connect}>
-            <label className="field">
-              <span>Código OTP</span>
-              <input
-                className="otp-input"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                value={otp}
-                onChange={(event) => setOtp(event.target.value)}
-                placeholder="000000"
-                disabled={Boolean(busy)}
-              />
-            </label>
-          </form>
-        )}
-
-        <div className="actions">
-          <button className="button primary big" onClick={() => connect()} disabled={Boolean(busy) || status.up}>
-            <Icon name="power" />
-            Conectar VPN
-          </button>
-          <button
-            className="button success big"
-            onClick={() => run(api.openRdp)}
-            disabled={Boolean(busy) || !status.up || rdpOpening || !config?.RDP_HOST}
-          >
-            <Icon name="monitor" />
-            {rdpOpening ? 'Abrindo RDP…' : 'Abrir RDP'}
-          </button>
-          <button
-            className={`${gatewayButton.className} big`}
-            onClick={() => run(gatewayButton.action)}
-            disabled={Boolean(busy) || (status.gateway === 'off' && !status.up)}
-          >
-            <Icon name="globe" />
-            {gatewayButton.label}
-          </button>
-
-          <div className="segmented" role="radiogroup" aria-label="Pelo túnel">
-            <span className="segmented-label">Pelo túnel</span>
-            {(Object.keys(modeLabels) as GatewayMode[]).map((mode) => (
-              <button
-                key={mode}
-                role="radio"
-                aria-checked={selectedMode === mode}
-                className={selectedMode === mode ? 'is-selected' : ''}
-                onClick={() => selectedMode !== mode && run(() => api.setMode(mode))}
-                disabled={Boolean(busy)}
-                title={modeText[mode]}
-              >
-                {modeLabels[mode]}
-              </button>
-            ))}
-          </div>
-
-          <button className="button big" onClick={() => run(api.disconnect)} disabled={Boolean(busy) || !status.up}>
-            <Icon name="unplug" />
-            Desconectar
-          </button>
-        </div>
-
-        <button className="link-button" onClick={() => setTotpOpen(true)}>
-          <Icon name="key" size={13} />
-          {totpEnabled ? 'Autenticador: código automático' : 'Autenticador (OTP)…'}
-        </button>
-
-        <p className="muted small center">
-          {config?.RDP_HOST ? (
-            <>
-              RDP: {config.RDP_USER ? `${config.RDP_USER}@` : ''}
-              {config.RDP_HOST}
-            </>
+    <div className="panel-layout">
+      <aside className="sidebar">
+        <section className="card list-card">
+          <header className="list-head">
+            <span className="eyebrow">
+              <Icon name="shield" size={13} /> Conexões
+            </span>
+            <button className="button small primary" onClick={newConnection}>
+              <Icon name="plus" />
+              Nova conexão
+            </button>
+          </header>
+          {connections.length === 0 ? (
+            <p className="list-empty muted small">Nenhuma conexão ainda.</p>
           ) : (
-            'RDP não configurado'
+            <ul className="list">
+              {connections.map((connection) => {
+                const isUp = status.up && status.activeId === connection.id;
+                return (
+                  <li key={connection.id}>
+                    <button
+                      className={`list-item${selected?.id === connection.id ? ' is-selected' : ''}`}
+                      onClick={() => setSelectedId(connection.id)}
+                    >
+                      <span className={`dot small-dot ${isUp ? 'up' : 'idle'}`} />
+                      <span className="list-text">
+                        <strong>{connection.name}</strong>
+                        <span className="muted small">{connection.host}</span>
+                      </span>
+                      {connection.tunnel.enabled && (
+                        <span title="Com túnel para o Windows">
+                          <Icon name="globe" size={14} />
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           )}
-        </p>
+        </section>
+      </aside>
+
+      <div className="panel-main">
+        {selected ? (
+          <ConnectionPanel
+            connection={selected}
+            otherActive={active && active.id !== selected.id ? active.name : null}
+            state={state}
+            vaultReady={vaultReady}
+            onEdit={() => setDialog({ kind: 'connection', connection: selected })}
+            onDelete={() => remove(selected)}
+            onManageTotp={() => setDialog({ kind: 'totp', connection: selected })}
+            onError={notifyError}
+          />
+        ) : (
+          <section className="card empty-state">
+            <Icon name="shield" size={32} />
+            <h2>Crie sua primeira conexão</h2>
+            <p className="muted">Gateway, usuário, senha e, se quiser, o túnel para o Windows usar a VPN.</p>
+            <button className="button primary" onClick={newConnection}>
+              <Icon name="plus" />
+              Nova conexão
+            </button>
+          </section>
+        )}
+        <LogView entries={log} />
       </div>
 
-      <LogView entries={log} />
-
-      {totpOpen && <TotpDialog enabled={Boolean(totpEnabled)} onClose={() => setTotpOpen(false)} onError={onError} />}
+      {dialog?.kind === 'connection' && (
+        <ConnectionForm
+          connection={dialog.connection}
+          vaultReady={vaultReady}
+          onClose={() => setDialog(null)}
+          onSaved={(connection) => {
+            setDialog(null);
+            setSelectedId(connection.id);
+            onNotify('ok', `Conexão "${connection.name}" salva`);
+            onChanged();
+          }}
+        />
+      )}
+      {dialog?.kind === 'totp' && (
+        <TotpDialog
+          connection={connections.find((c) => c.id === dialog.connection.id) ?? dialog.connection}
+          onClose={() => setDialog(null)}
+          onError={notifyError}
+        />
+      )}
     </div>
   );
 }

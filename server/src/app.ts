@@ -1,39 +1,74 @@
 import { existsSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import express, { type ErrorRequestHandler } from 'express';
-import { configExists, readConfig, writeConfig, type GatewayMode } from './config.ts';
-import { listenerCount, recentLog, state, subscribe, updateState } from './events.ts';
-import {
-  applyConfig,
-  importConfigFromDistro,
-  installWsl,
-  runInstall,
-  setVaultSecret,
-  systemInfo,
-  vaultSecrets,
-  vaultStatus,
-  type VaultSecret,
-} from './installer.ts';
+import express, { type ErrorRequestHandler, type Request } from 'express';
+import { dataChanged, listenerCount, recentLog, say, state, subscribe } from './events.ts';
+import { finishPendingMigration, importExistingSetup, installWsl, runInstall, systemInfo, updateCommands } from './installer.ts';
 import {
   connect,
   currentTotp,
+  detectCertificate,
   disconnect,
-  gatewayOff,
-  gatewayOn,
-  openRdp,
+  forgetTotpKey,
   refreshStatus,
-  refreshTotpEnabled,
   saveTotp,
-  setGatewayMode,
+  tunnelOff,
+  tunnelOn,
 } from './panel.ts';
 import { paths } from './paths.ts';
+import { getSettings, mutate, newId, readData, type Connection } from './store.ts';
 import { parseTotpSecret, totpNow } from './totp.ts';
-import { badRequest, parseConfig, parseGatewayMode, parseSecret } from './validation.ts';
+import { badRequest, HttpError, optionalSecret, parseConnection, parseSecret, parseSettings } from './validation.ts';
+import {
+  forgetSecrets,
+  helperVersion,
+  requiredHelperVersion,
+  secretName,
+  secretNames,
+  setSecret,
+  type SecretKind,
+} from './vault.ts';
 
 // The API drives the VPN, Windows routes and the password vault, so only same-machine requests
 // are accepted (blocks DNS rebinding), and every state-changing request must carry a custom
 // header that cross-site pages can't send without a CORS preflight (which is never granted).
 const allowedHosts = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+const body = (req: Request) => (req.body ?? {}) as Record<string, unknown>;
+
+/** Everything the UI lists, plus which secrets each connection has (never their values). */
+async function publicData() {
+  const data = await readData();
+  const version = await helperVersion(data.settings.distro).catch(() => null);
+  const vaultReady = version === requiredHelperVersion;
+  const names = vaultReady ? await secretNames(data.settings.distro).catch(() => new Set<string>()) : new Set<string>();
+  const has = (kind: SecretKind, id: string) => names.has(secretName(kind, id));
+  return {
+    settings: data.settings,
+    connections: data.connections.map((c) => ({ ...c, hasPassword: has('VPN_PASSWORD', c.id), hasTotp: has('TOTP_SECRET', c.id) })),
+    /** False until the Ubuntu commands are updated: secrets can't be read or saved yet. */
+    vaultReady,
+    helperVersion: version,
+  };
+}
+
+/** Stores or removes a secret when the request carries one (undefined keeps it). */
+async function applySecret(kind: SecretKind, id: string, value: string | undefined): Promise<void> {
+  if (value === undefined) return;
+  await setSecret((await getSettings()).distro, secretName(kind, id), value);
+}
+
+/** Fills in the gateway certificate when it was left empty; never blocks saving. */
+async function withCertificate<T extends Omit<Connection, 'id'>>(connection: T): Promise<T> {
+  if (connection.trustedCert) return connection;
+  try {
+    const trustedCert = await detectCertificate(connection.host, connection.port);
+    say(`Certificado de ${connection.host} detectado: ${trustedCert.slice(0, 16)}...`, 'ok');
+    return { ...connection, trustedCert };
+  } catch (error) {
+    say(`Aviso: ${(error as Error).message} Use "Detectar" depois.`, 'warn');
+    return connection;
+  }
+}
 
 export function createApp() {
   const app = express();
@@ -64,19 +99,18 @@ export function createApp() {
     void refreshStatus();
   });
 
-  app.get('/api/config', async (_req, res) => {
-    res.json({ exists: configExists(), values: await readConfig() });
+  app.get('/api/data', async (_req, res) => {
+    res.json(await publicData());
   });
 
-  app.put('/api/config', async (req, res) => {
-    const config = parseConfig(req.body ?? {});
-    await writeConfig(config);
-    if (!state.busy) updateState({ selectedMode: config.GATEWAY_MODE as GatewayMode });
-    res.json({ exists: true, values: config });
-  });
-
-  app.post('/api/config/apply', async (_req, res) => {
-    res.json({ ok: (await applyConfig()) === 0 });
+  // ------------------------------------------------------------- settings/system
+  app.put('/api/settings', async (req, res) => {
+    const settings = parseSettings(body(req));
+    await mutate((data) => {
+      data.settings = settings;
+    });
+    dataChanged();
+    res.json(settings);
   });
 
   app.get('/api/system', async (_req, res) => {
@@ -84,33 +118,67 @@ export function createApp() {
   });
 
   app.post('/api/system/install', async (req, res) => {
-    const body = req.body ?? {};
-    const code = await runInstall({
-      linuxPassword: parseSecret(body.linuxPassword, 'Senha do Linux'),
-      vpnPassword: parseSecret(body.vpnPassword, 'Senha da VPN'),
-      rdpPassword: parseSecret(body.rdpPassword, 'Senha do RDP'),
-      updateCert: body.updateCert === true,
-    });
+    const code = await runInstall(parseSecret(body(req).linuxPassword, 'Senha do Linux'));
     res.json({ ok: code === 0, code });
+  });
+
+  app.post('/api/system/update', async (_req, res) => {
+    res.json({ ok: (await updateCommands()) === 0 });
   });
 
   app.post('/api/system/install-wsl', async (_req, res) => {
     res.json({ ok: await installWsl() });
   });
 
-  app.get('/api/vault', async (_req, res) => {
-    res.json(await vaultStatus());
+  // ---------------------------------------------------------------- connections
+  app.post('/api/connections', async (req, res) => {
+    const input = await withCertificate(parseConnection(body(req)));
+    const password = optionalSecret(body(req).password, 'Senha');
+    const id = newId();
+    // Secret first: if the vault refuses it, nothing is half-saved.
+    await applySecret('VPN_PASSWORD', id, password || undefined);
+    const connection: Connection = { id, ...input };
+    await mutate((data) => {
+      data.connections.push(connection);
+    });
+    dataChanged();
+    res.status(201).json(connection);
   });
 
-  app.put('/api/vault/:name', async (req, res) => {
-    const name = req.params.name as VaultSecret;
-    if (!vaultSecrets.includes(name)) throw badRequest('Segredo desconhecido');
-    await setVaultSecret(name, parseSecret(req.body?.value, 'Senha'));
-    res.json(await vaultStatus());
+  app.put('/api/connections/:id', async (req, res) => {
+    const id = req.params.id;
+    const input = await withCertificate(parseConnection(body(req)));
+    await applySecret('VPN_PASSWORD', id, optionalSecret(body(req).password, 'Senha'));
+    const connection = await mutate((data) => {
+      const index = data.connections.findIndex((c) => c.id === id);
+      if (index < 0) throw new HttpError(404, 'Conexão não encontrada');
+      data.connections[index] = { id, ...input };
+      return data.connections[index];
+    });
+    dataChanged();
+    res.json(connection);
   });
 
-  app.post('/api/vpn/connect', async (req, res) => {
-    await connect(typeof req.body?.otp === 'string' ? req.body.otp : '');
+  app.delete('/api/connections/:id', async (req, res) => {
+    const id = req.params.id;
+    if (state.status.up && state.status.activeId === id) throw new HttpError(409, 'Desconecte antes de excluir esta conexão.');
+    await mutate((data) => {
+      data.connections = data.connections.filter((c) => c.id !== id);
+    });
+    await forgetSecrets((await getSettings()).distro, id);
+    forgetTotpKey(id);
+    dataChanged();
+    res.json({ ok: true });
+  });
+
+  app.post('/api/certificate', async (req, res) => {
+    const { host, port } = parseConnection({ name: 'x', user: 'x', ...body(req) });
+    res.json({ fingerprint: await detectCertificate(host, port) });
+  });
+
+  app.post('/api/connections/:id/connect', async (req, res) => {
+    const otp = body(req).otp;
+    await connect(req.params.id, typeof otp === 'string' ? otp : '');
     res.json({ ok: state.status.up });
   });
 
@@ -119,46 +187,38 @@ export function createApp() {
     res.json({ ok: true });
   });
 
-  app.post('/api/rdp/open', async (_req, res) => {
-    await openRdp();
+  app.post('/api/connections/:id/tunnel', async (req, res) => {
+    await tunnelOn(req.params.id);
     res.json({ ok: true });
   });
 
-  app.post('/api/gateway/on', async (_req, res) => {
-    await gatewayOn();
+  app.post('/api/tunnel/off', async (_req, res) => {
+    await tunnelOff();
     res.json({ ok: true });
   });
 
-  app.post('/api/gateway/off', async (_req, res) => {
-    await gatewayOff();
-    res.json({ ok: true });
+  // Live code of a connection's authenticator, shown on the home screen.
+  app.get('/api/connections/:id/totp', async (req, res) => {
+    res.json(await currentTotp(req.params.id));
   });
 
-  app.put('/api/gateway/mode', async (req, res) => {
-    await setGatewayMode(parseGatewayMode(req.body?.mode));
-    res.json({ ok: true });
-  });
-
-  // Live code of the stored authenticator key, to compare with the phone app.
-  app.get('/api/totp', async (_req, res) => {
-    res.json(await currentTotp());
-  });
-
-  app.post('/api/totp/preview', (req, res) => {
-    const key = parseTotpSecret(typeof req.body?.secret === 'string' ? req.body.secret : '');
-    res.json(key ? { valid: true, ...totpNow(key) } : { valid: false });
-  });
-
-  app.put('/api/totp', async (req, res) => {
-    const key = parseTotpSecret(typeof req.body?.secret === 'string' ? req.body.secret : '');
+  app.put('/api/connections/:id/totp', async (req, res) => {
+    const secret = body(req).secret;
+    const key = parseTotpSecret(typeof secret === 'string' ? secret : '');
     if (!key) throw badRequest('Chave inválida: use base32 (A-Z, 2-7) ou um link otpauth://');
-    await saveTotp(key);
+    await saveTotp(req.params.id, key);
     res.json({ enabled: true });
   });
 
-  app.delete('/api/totp', async (_req, res) => {
-    await saveTotp('');
+  app.delete('/api/connections/:id/totp', async (req, res) => {
+    await saveTotp(req.params.id, '');
     res.json({ enabled: false });
+  });
+
+  app.post('/api/totp/preview', (req, res) => {
+    const secret = body(req).secret;
+    const key = parseTotpSecret(typeof secret === 'string' ? secret : '');
+    res.json(key ? { valid: true, ...totpNow(key) } : { valid: false });
   });
 
   app.use('/api', (_req, res) => {
@@ -189,12 +249,11 @@ function startPolling(): void {
 
 async function initialize(): Promise<void> {
   try {
-    await importConfigFromDistro();
+    await importExistingSetup();
   } catch {
     // Distro unavailable: the Installation tab will guide the user.
   }
-  updateState({ selectedMode: (await readConfig()).GATEWAY_MODE as GatewayMode });
-  void refreshTotpEnabled();
+  void finishPendingMigration();
 }
 
 /** Starts the API (and the built UI, when present) on 127.0.0.1. Port 0 picks a free port. */
