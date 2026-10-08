@@ -35,7 +35,6 @@ export type TunnelMode = 'off' | 'global' | 'specific';
 
 export interface Tunnel {
   mode: TunnelMode;
-  m365: boolean;
   targets: string[];
 }
 
@@ -79,14 +78,12 @@ export interface TotpCode {
 export function tunnelSummary(tunnel: Tunnel): string {
   if (tunnel.mode === 'off') return 'Túnel desativado';
   if (tunnel.mode === 'global') return 'Túnel global';
-  const parts = [];
-  if (tunnel.targets.length) parts.push(`${tunnel.targets.length} destino${tunnel.targets.length > 1 ? 's' : ''}`);
-  if (tunnel.m365) parts.push('Microsoft 365');
-  return `Túnel específico · ${parts.join(' + ') || 'sem destinos'}`;
+  const count = tunnel.targets.length;
+  return `Túnel específico · ${count ? `${count} destino${count > 1 ? 's' : ''}` : 'sem destinos'}`;
 }
 
 /** Same as the server's tunnelSignature: tells whether the saved tunnel differs from the applied one. */
 export function tunnelSignature(connection: Connection): string {
-  const { mode, m365, targets } = connection.tunnel;
-  return JSON.stringify({ id: connection.id, mode, m365: mode === 'specific' && m365, targets: mode === 'specific' ? targets : [] });
+  const { mode, targets } = connection.tunnel;
+  return JSON.stringify({ id: connection.id, mode, targets: mode === 'specific' ? targets : [] });
 }

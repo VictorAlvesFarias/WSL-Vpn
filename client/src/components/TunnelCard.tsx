@@ -56,7 +56,7 @@ export function TunnelCard({ connection, isUp, state, onError }: TunnelCardProps
 
   async function changeMode(mode: TunnelMode) {
     if (mode === tunnel.mode || !(await save({ ...tunnel, mode }))) return;
-    const routable = mode === 'global' || tunnel.targets.length > 0 || tunnel.m365;
+    const routable = mode === 'global' || tunnel.targets.length > 0;
     // While connected the choice takes effect immediately.
     if (isUp && (mode === 'off' ? status.tunnel !== 'off' : routable)) await apply();
   }
@@ -72,7 +72,7 @@ export function TunnelCard({ connection, isUp, state, onError }: TunnelCardProps
 
   const active = isUp && status.tunnel === 'on';
   const pending = active && state.appliedTunnel !== null && state.appliedTunnel !== tunnelSignature(connection);
-  const routable = tunnel.mode === 'global' || (tunnel.mode === 'specific' && (tunnel.targets.length > 0 || tunnel.m365));
+  const routable = tunnel.mode === 'global' || (tunnel.mode === 'specific' && tunnel.targets.length > 0);
   const notApplied = isUp && routable && status.tunnel === 'off';
   const locked = Boolean(busy) || saving;
 
@@ -160,15 +160,6 @@ export function TunnelCard({ connection, isUp, state, onError }: TunnelCardProps
             </ul>
           )}
 
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={tunnel.m365}
-              onChange={(event) => save({ ...tunnel, m365: event.target.checked })}
-              disabled={locked}
-            />
-            Incluir Microsoft 365 (Teams, Outlook, OneDrive)
-          </label>
           <p className="muted small">
             Redes e IPs vão pelo túnel; endereços e URLs são resolvidos pelo DNS da empresa e roteados;
             <code> *.dominio</code> faz o Windows resolver esse domínio no DNS da empresa.

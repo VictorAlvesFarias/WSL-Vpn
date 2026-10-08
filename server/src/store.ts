@@ -20,18 +20,16 @@ export const tunnelModes: readonly TunnelMode[] = ['off', 'global', 'specific'];
 
 export interface Tunnel {
   mode: TunnelMode;
-  /** Specific mode: also the official Microsoft 365 ranges (Teams, Outlook, OneDrive). */
-  m365: boolean;
   /** Specific mode: networks (10.0.0.0/8), IPs, host names (intranet.company.com) or domains (*.company.local). */
   targets: string[];
 }
 
-export const emptyTunnel = (): Tunnel => ({ mode: 'off', m365: false, targets: [] });
+export const emptyTunnel = (): Tunnel => ({ mode: 'off', targets: [] });
 
 /** Tunnels saved before the mode existed had enabled/global flags. */
 function normalizeTunnel(raw: Partial<Tunnel> & { enabled?: boolean; global?: boolean }): Tunnel {
   const mode = raw.mode ?? (raw.enabled ? (raw.global ? 'global' : 'specific') : 'off');
-  return { mode, m365: Boolean(raw.m365), targets: raw.targets ?? [] };
+  return { mode, targets: raw.targets ?? [] };
 }
 
 /** A Fortinet SSL-VPN connection. Its password and authenticator key live in the WSL vault. */
@@ -100,7 +98,6 @@ export function fromLegacyEnv(env: Record<string, string>): Data {
       otpDelay: Number(env.VPN_OTP_DELAY) || 2,
       tunnel: {
         mode: 'off',
-        m365: env.GATEWAY_MODE === 'm365',
         targets: [
           ...splitList(env.GATEWAY_ROUTES),
           ...splitList(env.GATEWAY_DNS_SUFFIXES).map((suffix) => `*.${suffix.replace(/^\.+/, '')}`),

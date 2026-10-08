@@ -80,7 +80,7 @@ export function parseTunnel(body: Body): Tunnel {
   if (rawTargets.some((item) => typeof item !== 'string')) throw badRequest('Destinos do túnel inválidos');
   const targets = [...new Set((rawTargets as string[]).filter((item) => item.trim()).map(parseTarget))];
   if (targets.length > 200) throw badRequest('Destinos demais (máximo 200)');
-  return { mode: body.mode as TunnelMode, m365: body.m365 === true, targets };
+  return { mode: body.mode as TunnelMode, targets };
 }
 
 /** Connection fields edited in the modal (the tunnel has its own endpoint). */

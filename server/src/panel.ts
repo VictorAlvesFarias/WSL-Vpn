@@ -216,11 +216,11 @@ async function resolveInWsl(distro: string, hosts: string[]): Promise<Map<string
 
 /** Identifies what a tunnel routes, so the UI can tell when the saved one differs from the applied one. */
 export function tunnelSignature(connection: Connection): string {
-  const { mode, m365, targets } = connection.tunnel;
-  return JSON.stringify({ id: connection.id, mode, m365: mode === 'specific' && m365, targets: mode === 'specific' ? targets : [] });
+  const { mode, targets } = connection.tunnel;
+  return JSON.stringify({ id: connection.id, mode, targets: mode === 'specific' ? targets : [] });
 }
 
-const hasTargets = (connection: Connection) => connection.tunnel.targets.length > 0 || connection.tunnel.m365;
+const hasTargets = (connection: Connection) => connection.tunnel.targets.length > 0;
 
 async function tunnelOnSteps(connection: Connection, distro: string): Promise<boolean> {
   const { tunnel } = connection;
@@ -230,13 +230,13 @@ async function tunnelOnSteps(connection: Connection, distro: string): Promise<bo
   const networks = targets.filter((t) => /^\d/.test(t));
   const hosts = targets.filter((t) => !/^\d/.test(t) && !t.startsWith('*.'));
   const domains = targets.filter((t) => t.startsWith('*.')).map((t) => `.${t.slice(2)}`);
-  const mode = global ? 'tudo' : tunnel.m365 ? 'm365' : 'empresa';
+  const mode = global ? 'tudo' : 'empresa';
   if (!global && !hasTargets(connection)) {
     say('Túnel específico sem destinos: adicione algum na lista.', 'warn');
     return false;
   }
   say(
-    `Adicionando o túnel no Windows: ${global ? 'todo o tráfego (global)' : `${targets.length} destino(s)${tunnel.m365 ? ' + Microsoft 365' : ''}`} (confirme o UAC)...`,
+    `Adicionando o túnel no Windows: ${global ? 'todo o tráfego (global)' : `${targets.length} destino(s)`} (confirme o UAC)...`,
     'step',
   );
 
@@ -278,7 +278,7 @@ async function tunnelOnSteps(connection: Connection, distro: string): Promise<bo
   // otherwise the listed domains plus each exact host name.
   const namespaces = global ? ['.'] : [...domains, ...hosts];
   if (namespaces.length) params.push('-Suffixes', namespaces.join(','));
-  if (mode !== 'empresa') params.push('-VpnHost', connection.host);
+  if (global) params.push('-VpnHost', connection.host);
 
   const previous = state.status.tunnel;
   const { ok, lines } = await runGatewayElevated(params);
@@ -290,9 +290,7 @@ async function tunnelOnSteps(connection: Connection, distro: string): Promise<bo
     return false;
   }
   updateState({ appliedTunnel: tunnelSignature(connection) });
-  say(global ? 'Túnel global ativo: todo o tráfego do Windows passa pela VPN.' : 'Túnel ativo no Windows.', 'ok');
-  if (mode !== 'empresa') say('Feche o Teams por completo e abra de novo para ele reconectar.');
-  return true;
+  say(global ? 'Túnel global ativo: todo o tráfego do Windows passa pela VPN.' : 'Túnel ativo no Windows.', 'ok');  return true;
 }
 
 async function tunnelOffSteps(distro: string): Promise<boolean> {

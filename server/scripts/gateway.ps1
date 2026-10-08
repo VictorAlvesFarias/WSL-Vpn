@@ -17,19 +17,17 @@
 .PARAMETER Dns
   Corporate DNS servers, comma separated (On).
 .PARAMETER Routes
-  Networks routed through WSL2, separated by commas or spaces (On). May be empty with -Mode tudo/m365.
+  Networks routed through WSL2, separated by commas or spaces (On). May be empty with -Mode tudo.
 .PARAMETER Suffixes
   Domains (.company) or exact host names resolved by the corporate DNS (On).
 .PARAMETER Mode
   What goes through the tunnel (On):
     empresa  only the -Routes networks (the connection's tunnel targets);
-    m365     + the official Microsoft 365 ranges (Teams, SharePoint/OneDrive, Outlook, login) -
-             Microsoft then sees the company IP;
     tudo     all IPv4 traffic (0.0.0.0/1 + 128.0.0.0/1). The local network and the home
              router DNS stay outside: their routes are more specific. The original default
              route is never touched.
 .PARAMETER VpnHost
-  VPN gateway (m365/tudo). If its IP falls inside a range routed through the tunnel, it gets an
+  VPN gateway (tudo). If its IP falls inside a range routed through the tunnel, it gets an
   exception route through the home router; otherwise the tunnel would try to go through itself.
 .PARAMETER Result
   File where the result is written: the elevated process can't return its output to the app,
@@ -42,18 +40,16 @@ param(
     [string]$Dns = "",
     [string]$Routes = "",
     [string]$Suffixes = "",
-    [ValidateSet("empresa", "m365", "tudo")][string]$Mode = "empresa",
+    [ValidateSet("empresa", "tudo")][string]$Mode = "empresa",
     [string]$VpnHost = "",
     [Parameter(Mandatory)][string]$Result
 )
 
 $ErrorActionPreference = "Stop"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 # Same tag and state folder as the original panel, so routes it created are still cleaned up.
 $Tag = "vpnwsl-gateway"
 $StateDir = Join-Path $env:ProgramData "vpnwsl"
 $BypassFile = Join-Path $StateDir "gateway-bypass.txt"   # exception routes created
-$M365Cache = Join-Path $StateDir "m365-ipv4.txt"         # last good list
 $out = New-Object System.Collections.Generic.List[string]
 
 function Split-List ($text) { @($text -split '[\s,;]+' | Where-Object { $_ }) }
@@ -66,31 +62,6 @@ function Test-InPrefix ($ip, $cidr) {
     $network, $bits = $cidr -split '/'
     $mask = if ([int]$bits -eq 0) { [uint32]0 } else { [uint32]([math]::Pow(2, 32) - [math]::Pow(2, 32 - [int]$bits)) }
     ((ConvertTo-UInt32 $ip) -band $mask) -eq ((ConvertTo-UInt32 $network) -band $mask)
-}
-
-function Get-M365Prefixes {
-    $list = @()
-    $problem = ""
-    try {
-        $url = "https://endpoints.office.com/endpoints/worldwide?clientrequestid=$([guid]::NewGuid())&NoIPv6=true"
-        # Store before filtering: in PowerShell 5.1 Invoke-RestMethod sends a JSON array down
-        # the pipeline as ONE object, and the filter wouldn't walk it.
-        $endpoints = Invoke-RestMethod -Uri $url -UseBasicParsing -TimeoutSec 20
-        $list = @($endpoints | Where-Object { $_.ips } | ForEach-Object { $_.ips } |
-            Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$' } | Sort-Object -Unique)
-        if ($list.Count -lt 10) { $problem = "a lista veio com $($list.Count) faixa(s)" }
-    } catch { $list = @(); $problem = $_.Exception.Message }
-    if ($list.Count -ge 10) {
-        New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
-        Set-Content -Path $M365Cache -Value $list -Encoding ascii
-        $out.Add("Microsoft 365: $($list.Count) faixas (lista oficial)")
-    } elseif (Test-Path $M365Cache) {
-        $list = @(Get-Content $M365Cache | Where-Object { $_ })
-        $out.Add("Microsoft 365: $($list.Count) faixas (cache - lista oficial indisponivel)")
-    } else {
-        throw "Nao consegui baixar a lista de IPs do Microsoft 365 (endpoints.office.com): $problem"
-    }
-    return $list
 }
 
 function Remove-Gateway {
@@ -116,14 +87,13 @@ function Remove-Gateway {
 
 try {
     if ($Action -eq "On") {
-        # Everything that can fail (validation, list download) happens BEFORE removing the
-        # current state: a failure here leaves the gateway as it was.
+        # Everything that can fail (validation) happens BEFORE removing the current state:
+        # a failure here leaves the gateway as it was.
         if ($WslIp -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "IP do WSL invalido: '$WslIp'" }
         $prefixes = @(Split-List $Routes)
-        # Global ("tudo") and Microsoft 365 bring their own ranges; otherwise something is needed.
+        # Global ("tudo") brings its own ranges; otherwise something is needed.
         if (-not $prefixes -and $Mode -eq "empresa") { throw "Nenhum destino para o tunel." }
         $companyCount = $prefixes.Count
-        if ($Mode -eq "m365") { $prefixes = @($prefixes + (Get-M365Prefixes) | Sort-Object -Unique) }
         # Two halves instead of 0.0.0.0/0: they beat the default route by being more specific,
         # and turning off is just removing them - the home default route stays intact.
         if ($Mode -eq "tudo") { $prefixes = @($prefixes + "0.0.0.0/1" + "128.0.0.0/1") }
@@ -137,7 +107,7 @@ try {
 
         # Exception for the VPN gateway BEFORE the new routes: after them, the "normal" path to
         # it could already be the tunnel itself.
-        if ($Mode -ne "empresa" -and $VpnHost) {
+        if ($Mode -eq "tudo" -and $VpnHost) {
             $homeRoute = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 |
                 Where-Object { $_.InterfaceAlias -notlike 'vEthernet (WSL*' } |
                 Sort-Object { $_.RouteMetric + $_.InterfaceMetric } | Select-Object -First 1
@@ -161,7 +131,6 @@ try {
                 -RouteMetric 5 -PolicyStore ActiveStore | Out-Null
         }
         if ($companyCount) { $out.Add("destinos: $companyCount -> $WslIp ($((Split-List $Routes) -join ', '))") }
-        if ($Mode -eq "m365") { $out.Add("rotas do Microsoft 365: $($prefixes.Count - $companyCount) -> $WslIp") }
         if ($Mode -eq "tudo") { $out.Add("todo o trafego -> $WslIp (rede local e DNS do roteador continuam em casa)") }
 
         $servers = Split-List $Dns

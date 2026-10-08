@@ -62,9 +62,7 @@ A radio chooses what Windows sends through the connection: **Desativado** (only 
 | `intranet.company.com`, `https://portal.company.com/app` | resolved through the company DNS (inside WSL) and routed; Windows also resolves that name through the company DNS |
 | `*.company.local` | Windows resolves the whole domain through the company DNS (add the networks it lives in as targets) |
 
-- **Incluir Microsoft 365**: adds the official Microsoft 365 ranges (Teams, SharePoint/OneDrive, Outlook, login), fetched from `endpoints.office.com` with a local cache.
-
-How it works: WSL2 forwards and masquerades (NAT) Windows traffic into `ppp0`; Windows gets routes with WSL2 as next hop (in the ActiveStore, gone on reboot) and NRPT rules tagged `vpnwsl-gateway`. In global/Microsoft 365 mode the VPN gateway gets an exception route through the home router, otherwise the tunnel would try to go through itself. If the VPN drops with the tunnel on, the app removes it (UAC) to give Windows its internet back. Leftovers (e.g. after a reboot, which keeps NRPT rules) show up as *Limpar túnel*.
+How it works: WSL2 forwards and masquerades (NAT) Windows traffic into `ppp0`; Windows gets routes with WSL2 as next hop (in the ActiveStore, gone on reboot) and NRPT rules tagged `vpnwsl-gateway`. In global mode the VPN gateway gets an exception route through the home router, otherwise the tunnel would try to go through itself. If the VPN drops with the tunnel on, the app removes it (UAC) to give Windows its internet back. Leftovers (e.g. after a reboot, which keeps NRPT rules) show up as *Limpar túnel*.
 
 ## Secrets
 
