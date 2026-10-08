@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+client/dist/
+desktop/dist/
+release/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.*
+
+# Local app data, in case GITUSER_HOME points inside the repo
+.gituser/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,26 @@
+appId: com.victoralves.wslvpn
+productName: WSL-Vpn
+directories:
+  output: release
+  buildResources: build
+files:
+  - package.json
+  - desktop/dist/**
+  - build/icon.png
+# PowerShell can't read files inside app.asar, and the UI is served by express, so ship both as plain files.
+extraResources:
+  - from: server/scripts
+    to: scripts
+  - from: client/dist
+    to: client
+win:
+  target: nsis
+  icon: build/icon.png
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: WSL-Vpn
+  artifactName: WSL-Vpn-Setup-${version}.exe
