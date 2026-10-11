@@ -545,21 +545,7 @@ main {
   gap: 4px;
   padding: 14px 16px;
   border: 1px solid var(--border);
-  border-left: 4px solid var(--border);
   border-radius: 12px;
-}
-
-.status-block.up {
-  border-left-color: var(--ok);
-}
-
-.status-block.down {
-  border-left-color: var(--danger);
-}
-
-.status-block.busy,
-.status-block.unknown {
-  border-left-color: var(--warn);
 }
 
 .status-row {
