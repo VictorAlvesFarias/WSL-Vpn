@@ -207,6 +207,8 @@ case "${1:-}" in
     iptables -t mangle -A VPNGW -p tcp --tcp-flags SYN,RST SYN \
       -m tcpmss --mss "$((MSS + 1)):65535" -j TCPMSS --set-mss "$MSS"
     iptables -t mangle -A FORWARD -j VPNGW
+    # Forwarding is shared by every distro (WSL 2 has one network namespace): remember what it was.
+    [ -f /run/wsl-vpn-ip-forward ] || cat /proc/sys/net/ipv4/ip_forward > /run/wsl-vpn-ip-forward
     sysctl -qw net.ipv4.ip_forward=1
     # Read by the app: the IP for the Windows routes and the DNS servers for NRPT.
     echo "WSL_IP=$(ip -4 -br addr show eth0 | awk '{print $3}' | cut -d/ -f1)"
@@ -214,7 +216,13 @@ case "${1:-}" in
     ;;
   gw-off)
     gw_clear
-    sysctl -qw net.ipv4.ip_forward=0
+    # Put back the forwarding from before gw-on, but never turn it off under Docker (in this or
+    # another distro): its containers lose the internet without it.
+    previous=$(cat /run/wsl-vpn-ip-forward 2>/dev/null || echo 0)
+    rm -f /run/wsl-vpn-ip-forward
+    if [ "$previous" = 0 ] && ! ip link show docker0 >/dev/null 2>&1; then
+      sysctl -qw net.ipv4.ip_forward=0
+    fi
     echo "gateway desligado"
     ;;
   gw-status)
