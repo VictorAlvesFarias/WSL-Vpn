@@ -14,7 +14,7 @@ Windows host
 
 - **server/** – Express API (TypeScript run natively by Node 24) on `127.0.0.1:4312`. Drives `wsl.exe`, streams state and log to the UI with Server-Sent Events. Connections are stored in `~/.wsl-vpn/data.json` (override with `WSLVPN_HOME`).
 - **server/scripts/** – PowerShell: `install.ps1` (Windows + Ubuntu), `setup.ps1` (Ubuntu; embeds the Linux commands `vpn-up`, `vpn-down`, `vpn-helper`), `gateway.ps1` (Windows routes/DNS, elevated).
-- **client/** – React + Vite UI on `127.0.0.1:5312` (proxies `/api`).
+- **client/** – React + Vite + Tailwind 4 + Radix (Geist font, Lucide icons) on `127.0.0.1:5312` (proxies `/api`). Same layout as the other desktop panels (Audable, Gituser…): its own title bar with the menus and the command center (Ctrl+Shift+P opens the command palette), an activity bar (Conexões, Instalação) and a status bar with the VPN, the task in progress and the Windows tunnel.
 - **desktop/** – Electron shell and NSIS installer.
 
 ## Usage

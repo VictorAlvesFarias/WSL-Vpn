@@ -1,5 +1,8 @@
+import { Eye, EyeOff } from 'lucide-react';
 import { useState } from 'react';
-import { Icon } from './Icon';
+import { Badge } from './ui/Badge';
+import { Button } from './ui/Button';
+import { Input } from './ui/Input';
 
 interface SecretInputProps {
   label: string;
@@ -17,29 +20,32 @@ export function SecretInput({ label, stored, value, onChange, disabled }: Secret
   const removing = stored && value === '';
 
   return (
-    <label className="field">
-      <span className="field-label">
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <label className="flex items-center gap-2 text-[12.5px] font-medium">
         {label}
-        {stored && !removing && <span className="chip chip-ok">no cofre</span>}
-      </span>
-      <div className="input-with-actions">
-        <input
+        {stored && !removing && <Badge tone="ok">salvo (criptografado)</Badge>}
+        {removing && <Badge tone="danger">será removido</Badge>}
+      </label>
+      <div className="relative">
+        <Input
           type={show ? 'text' : 'password'}
           value={value ?? ''}
           onChange={(event) => onChange(event.target.value || undefined)}
-          placeholder={removing ? 'Será removida ao salvar' : stored ? 'Vazio: mantém a salva' : 'Senha'}
+          placeholder={removing ? 'Será removido ao salvar' : stored ? 'Vazio: mantém o valor salvo' : ''}
           autoComplete="new-password"
           disabled={disabled || removing}
+          className="pr-9 font-mono"
+          aria-label={label}
         />
-        <button type="button" className="icon-button" onClick={() => setShow(!show)} title="Mostrar">
-          <Icon name={show ? 'eyeOff' : 'eye'} />
-        </button>
+        <Button size="icon" variant="ghost" className="absolute top-1 right-1 size-6 [&_svg]:size-3.5" onClick={() => setShow(!show)} aria-label={show ? 'Ocultar' : 'Mostrar'}>
+          {show ? <EyeOff /> : <Eye />}
+        </Button>
       </div>
       {stored && (
-        <button type="button" className="link-button small start" onClick={() => onChange(removing ? undefined : '')}>
-          {removing ? 'Manter a senha salva' : 'Remover a senha salva'}
+        <button type="button" className="self-start text-[12px] text-accent hover:underline" onClick={() => onChange(removing ? undefined : '')}>
+          {removing ? 'Manter o valor salvo' : 'Remover o valor salvo'}
         </button>
       )}
-    </label>
+    </div>
   );
 }

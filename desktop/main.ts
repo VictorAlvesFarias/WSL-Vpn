@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, dialog, Menu, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, Menu, nativeTheme, session, shell } from 'electron';
 import { startServer } from '../server/src/app.ts';
 import { configurePaths } from '../server/src/paths.ts';
 
@@ -15,16 +15,25 @@ configurePaths(
 
 let mainWindow: BrowserWindow | null = null;
 
+/** Window buttons drawn over the app's own top bar, in its colors (--sidebar and --fg-muted in index.css). */
+const titleBarOverlay = () =>
+  nativeTheme.shouldUseDarkColors
+    ? { color: '#09090b', symbolColor: '#9a9aa6', height: 36 }
+    : { color: '#efeff2', symbolColor: '#676773', height: 36 };
+
 function createWindow(port: number) {
   mainWindow = new BrowserWindow({
-    width: 1100,
+    width: 1200,
     height: 800,
-    minWidth: 420,
-    minHeight: 560,
+    minWidth: 720,
+    minHeight: 520,
     title: 'WSL-Vpn',
     icon: join(repoRoot, 'build', 'icon.png'),
-    backgroundColor: '#0f1115',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0e0e11' : '#f6f6f8',
     autoHideMenuBar: true,
+    // Like VS Code: the app draws the title bar (menus, command center); Windows only the window buttons.
+    titleBarStyle: 'hidden',
+    titleBarOverlay: titleBarOverlay(),
     show: false,
     webPreferences: { contextIsolation: true, sandbox: true },
   });
@@ -44,7 +53,12 @@ function createWindow(port: number) {
       if (url.startsWith('https://')) void shell.openExternal(url);
     }
   });
-  mainWindow.on('closed', () => (mainWindow = null));
+  const followTheme = () => mainWindow?.setTitleBarOverlay(titleBarOverlay());
+  nativeTheme.on('updated', followTheme);
+  mainWindow.on('closed', () => {
+    nativeTheme.off('updated', followTheme);
+    mainWindow = null;
+  });
 }
 
 if (!app.requestSingleInstanceLock()) {
