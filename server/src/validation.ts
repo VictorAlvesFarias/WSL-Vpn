@@ -1,4 +1,4 @@
-import { tunnelModes, type Connection, type Settings, type Tunnel, type TunnelMode } from './store.ts';
+import { tunnelModes, type Connection, type Prefs, type Settings, type Tunnel, type TunnelMode } from './store.ts';
 
 export class HttpError extends Error {
   status: number;
@@ -35,6 +35,10 @@ function integer(body: Body, field: string, label: string, min: number, max: num
     throw badRequest(`${label} deve ser um número de ${min} a ${max}`);
   }
   return value;
+}
+
+export function parsePrefs(body: Body): Prefs {
+  return { autoReconnect: body.autoReconnect === true, elevateOnStart: body.elevateOnStart === true };
 }
 
 export function parseSettings(body: Body): Settings {

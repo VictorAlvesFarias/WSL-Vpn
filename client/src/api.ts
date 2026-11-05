@@ -1,4 +1,4 @@
-import type { AppData, Connection, ConnectionInput, Settings, SystemInfo, TotpCode, Tunnel } from './types';
+import type { AppData, Connection, ConnectionInput, Prefs, Settings, SystemInfo, TotpCode, Tunnel } from './types';
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -17,6 +17,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export const api = {
   data: () => request<AppData>('GET', '/data'),
   saveSettings: (settings: Settings) => request<Settings>('PUT', '/settings', settings),
+  savePrefs: (prefs: Prefs) => request<Prefs>('PUT', '/prefs', prefs),
+  elevate: () => request<{ elevated: boolean }>('POST', '/elevate'),
 
   system: () => request<SystemInfo>('GET', '/system'),
   install: (linuxPassword: string) => request<{ ok: boolean; code: number }>('POST', '/system/install', { linuxPassword }),

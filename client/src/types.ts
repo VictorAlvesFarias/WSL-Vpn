@@ -24,6 +24,15 @@ export interface PanelState {
   busy: string | null;
   /** Signature of the tunnel last applied by the app (see tunnelSignature). */
   appliedTunnel: string | null;
+  /** The elevated helper is up: tunnel changes don't ask for the UAC. */
+  elevated: boolean;
+  /** Reconnection in progress after the VPN dropped. */
+  reconnect: { connectionId: string; name: string; attempt: number; nextAt: string } | null;
+}
+
+export interface Prefs {
+  autoReconnect: boolean;
+  elevateOnStart: boolean;
 }
 
 export interface Settings {
@@ -56,6 +65,7 @@ export type ConnectionInput = Omit<Connection, 'id' | 'hasPassword' | 'hasTotp' 
 
 export interface AppData {
   settings: Settings;
+  prefs: Prefs;
   connections: Connection[];
   vaultReady: boolean;
   helperVersion: number | null;

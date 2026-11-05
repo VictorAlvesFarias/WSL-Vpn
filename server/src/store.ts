@@ -5,6 +5,16 @@ import { join } from 'node:path';
 import { paths } from './paths.ts';
 import { HttpError } from './validation.ts';
 
+/** How the app behaves (Preferências). */
+export interface Prefs {
+  /** Connect again by itself when the VPN drops (needs the authenticator, or no OTP). */
+  autoReconnect: boolean;
+  /** Ask for administrator once when the app opens, so tunnel changes don't ask each time. */
+  elevateOnStart: boolean;
+}
+
+export const defaultPrefs = (): Prefs => ({ autoReconnect: true, elevateOnStart: true });
+
 /** Ubuntu side, shared by every connection. */
 export interface Settings {
   distro: string;
@@ -47,6 +57,8 @@ export interface Connection {
 
 export interface Data {
   settings: Settings;
+  /** Missing in files saved before Preferências existed: defaultPrefs() then. */
+  prefs?: Prefs;
   connections: Connection[];
   /** Id that the single-connection vault secrets must be renamed to (see vpn-helper migrate-legacy). */
   legacySecrets?: { vpnId: string };
@@ -137,9 +149,10 @@ export async function importLegacyEnv(text: string): Promise<void> {
 
 export async function readData(): Promise<Data> {
   if (!dataExists()) return emptyData();
-  const { settings, connections, legacySecrets } = JSON.parse(await readFile(dataFile(), 'utf8')) as Data;
+  const { settings, prefs, connections, legacySecrets } = JSON.parse(await readFile(dataFile(), 'utf8')) as Data;
   return {
     settings,
+    prefs: { ...defaultPrefs(), ...prefs },
     connections: connections.map((c) => ({ ...c, tunnel: normalizeTunnel(c.tunnel ?? {}) })),
     ...(legacySecrets ? { legacySecrets } : {}),
   };
@@ -162,6 +175,10 @@ export async function getConnection(id: string): Promise<Connection> {
   const connection = (await readData()).connections.find((c) => c.id === id);
   if (!connection) throw new HttpError(404, 'Conexão não encontrada');
   return connection;
+}
+
+export async function getPrefs(): Promise<Prefs> {
+  return (await readData()).prefs ?? defaultPrefs();
 }
 
 export async function getSettings(): Promise<Settings> {

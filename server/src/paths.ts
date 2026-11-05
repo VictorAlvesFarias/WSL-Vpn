@@ -17,3 +17,5 @@ export function configurePaths(overrides: Partial<typeof paths>): void {
 export const scriptPath = (name: string) => join(paths.scriptsDir, name);
 /** gateway.ps1 runs elevated and can't hand its output back, so it writes it here. */
 export const gatewayResultFile = () => join(tmpdir(), 'wsl-vpn-gateway.txt');
+/** Requests and results exchanged with the elevated helper (gateway-service.ps1). */
+export const gatewayServiceDir = () => join(tmpdir(), 'wsl-vpn-gateway');

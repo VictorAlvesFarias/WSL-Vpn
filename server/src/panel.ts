@@ -1,6 +1,6 @@
 import { runGatewayElevated } from './elevated.ts';
 import { dataChanged, say, sayLines, state, updateState, type TunnelState } from './events.ts';
-import { getConnection, getSettings, type Connection } from './store.ts';
+import { getConnection, getPrefs, getSettings, type Connection } from './store.ts';
 import { parseTotpSecret, totpNow } from './totp.ts';
 import { HttpError } from './validation.ts';
 import { getSecret, secretName, setSecret } from './vault.ts';
@@ -85,14 +85,94 @@ export async function refreshStatus(): Promise<void> {
 
     if (dropped && tunnel !== 'off') {
       // With the tunnel on (especially global) Windows depends on it and would stay offline
-      // until someone clicked. Undo it right away.
-      say('A VPN caiu: removendo o túnel do Windows para devolver a sua internet (confirme o UAC)...', 'warn');
+      // until someone clicked. Undo it right away; a reconnection puts it back.
+      say(`A VPN caiu: removendo o túnel do Windows para devolver a sua internet${state.elevated ? '' : ' (confirme o UAC)'}...`, 'warn');
       void tunnelOff().catch(() => undefined);
     }
+    // Up through the app since before it opened (or after a restart of it): watch it too.
+    if (up && info.ACTIVE && !wanted && !state.reconnect) wanted = info.ACTIVE;
+    if (dropped) await planReconnect();
+    else if (up) clearReconnect(true);
+    else void reconnectIfDue();
   } finally {
     polling = false;
   }
 }
+
+// --------------------------------------------------------------- reconnection
+
+/**
+ * The connection the user wants up: set when one connects through the app, cleared when they
+ * disconnect (or connect elsewhere). While it is set and the VPN is down, the app reconnects
+ * with growing pauses, as long as Preferências allows and no code has to be typed.
+ */
+let wanted: string | null = null;
+const pauses = [5, 15, 30, 60, 120, 300];
+
+/** Something needs the status checked even with the window closed (see app.ts polling). */
+export const watching = () => wanted !== null;
+
+function clearReconnect(reconnected = false): void {
+  if (!state.reconnect) return;
+  if (reconnected) say(`[OK] Reconectada: ${state.reconnect.name}.`, 'ok');
+  updateState({ reconnect: null });
+}
+
+async function planReconnect(): Promise<void> {
+  if (!wanted) return;
+  const prefs = await getPrefs();
+  const connection = await getConnection(wanted).catch(() => null);
+  if (!prefs.autoReconnect || !connection) {
+    wanted = null;
+    return;
+  }
+  if (connection.otpRequired && !(await totpKey(connection.id))) {
+    say(`A VPN caiu. ${connection.name} pede código OTP e não tem autenticador cadastrado: reconecte à mão.`, 'warn');
+    wanted = null;
+    return;
+  }
+  scheduleNext(connection, 0);
+}
+
+function scheduleNext(connection: Connection, attempt: number): void {
+  const seconds = pauses[Math.min(attempt, pauses.length - 1)];
+  say(`Reconectando ${connection.name} em ${seconds}s${attempt ? ` (tentativa ${attempt + 1})` : ''}...`, attempt ? 'warn' : 'step');
+  updateState({
+    reconnect: { connectionId: connection.id, name: connection.name, attempt, nextAt: new Date(Date.now() + seconds * 1000).toISOString() },
+  });
+}
+
+let reconnecting = false;
+
+/** Called on every status check while the VPN is down. */
+async function reconnectIfDue(): Promise<void> {
+  const plan = state.reconnect;
+  if (!plan || reconnecting || state.busy || Date.now() < Date.parse(plan.nextAt)) return;
+  if (!wanted || !(await getPrefs()).autoReconnect) {
+    wanted = null;
+    clearReconnect();
+    return;
+  }
+  reconnecting = true;
+  try {
+    const connection = await getConnection(plan.connectionId);
+    say(`Reconectando ${connection.name}...`, 'step');
+    const ok = await connect(connection.id, '', true).catch((error: Error) => {
+      say(`Reconexão: ${error.message}`, 'warn');
+      return false;
+    });
+    // The status check connect() starts confirms it and clears the plan; a failure waits longer.
+    if (!ok && state.reconnect) scheduleNext(connection, plan.attempt + 1);
+  } catch {
+    wanted = null;
+    clearReconnect();
+  } finally {
+    reconnecting = false;
+  }
+}
+
+/** " (confirme o UAC)" unless the elevated helper takes care of it. */
+const uac = () => (state.elevated ? '' : ' (confirme o UAC)');
 
 // ----------------------------------------------------------- authenticator
 
@@ -142,21 +222,27 @@ async function totpCodeForConnect(connectionId: string): Promise<string | null> 
 
 // --------------------------------------------------------------- connection
 
-export async function connect(connectionId: string, typedOtp: string): Promise<void> {
+/** Resolves to whether the VPN came up. */
+export async function connect(connectionId: string, typedOtp: string, automatic = false): Promise<boolean> {
   const connection = await getConnection(connectionId);
+  // A manual connect replaces any pending reconnection.
+  if (!automatic) {
+    wanted = null;
+    clearReconnect();
+  }
   const { distro } = await getSettings();
   if (state.status.up) throw new HttpError(409, 'Já existe uma VPN conectada: desconecte antes.');
   // Digits only: spaces or a BOM pasted with the code make the gateway reject a valid token.
   let otp = typedOtp.replace(/\D/g, '');
 
-  await exclusive(`Conectando ${connection.name}`, async () => {
+  return exclusive(`Conectando ${connection.name}`, async () => {
     say(`Conectando a ${connection.name} (${connection.host})...`, 'step');
     // A typed code wins; when the field is empty the registered authenticator fills it in.
     if (connection.otpRequired && !otp) {
       const generated = await totpCodeForConnect(connection.id);
       if (!generated) {
         say('Informe o código OTP ou cadastre o autenticador desta conexão.', 'error');
-        return;
+        return false;
       }
       otp = generated;
     }
@@ -177,17 +263,23 @@ export async function connect(connectionId: string, typedOtp: string): Promise<v
     );
     sayLines(result.stdout + result.stderr);
     if (result.code < 0) say('Tempo esgotado ao conectar.', 'error');
-    if (result.code === 0 && connection.tunnel.mode !== 'off') await tunnelOnSteps(connection, distro);
+    if (result.code !== 0) return false;
+    wanted = connection.id;
+    if (connection.tunnel.mode !== 'off') await tunnelOnSteps(connection, distro);
+    return true;
   });
 }
 
 export async function disconnect(): Promise<void> {
   const { distro } = await getSettings();
+  // On purpose: nothing to bring back.
+  wanted = null;
+  clearReconnect();
   await exclusive('Desconectando', async () => {
     say('Desconectando...', 'step');
     if (state.status.tunnel !== 'off') {
       // Without the VPN, the Windows routes would point at nothing.
-      say('Removendo antes o túnel do Windows (confirme o UAC)...');
+      say(`Removendo antes o túnel do Windows${state.elevated ? '' : ' (confirme o UAC)'}...`);
       if (!(await tunnelOffSteps(distro))) say("Aviso: rotas do Windows mantidas; use 'Limpar túnel' depois.", 'warn');
     }
     const result = await wslExec(distro, ['vpn-down'], { timeoutMs: 90_000 });
@@ -236,7 +328,7 @@ async function tunnelOnSteps(connection: Connection, distro: string): Promise<bo
     return false;
   }
   say(
-    `Adicionando o túnel no Windows: ${global ? 'todo o tráfego (global)' : `${targets.length} destino(s)`} (confirme o UAC)...`,
+    `Adicionando o túnel no Windows: ${global ? 'todo o tráfego (global)' : `${targets.length} destino(s)`}${uac()}...`,
     'step',
   );
 
@@ -315,7 +407,7 @@ export async function applyTunnel(connectionId: string): Promise<void> {
   if (connection.tunnel.mode === 'off') {
     if (state.status.tunnel === 'off') return;
     await exclusive('Removendo o túnel', async () => {
-      say('Túnel desativado: removendo do Windows (confirme o UAC)...', 'step');
+      say(`Túnel desativado: removendo do Windows${uac()}...`, 'step');
       await tunnelOffSteps(distro);
     });
     return;
@@ -330,7 +422,7 @@ export async function applyTunnel(connectionId: string): Promise<void> {
 export async function tunnelOff(): Promise<void> {
   const { distro } = await getSettings();
   await exclusive('Removendo o túnel', async () => {
-    say('Removendo o túnel do Windows (confirme o UAC)...', 'step');
+    say(`Removendo o túnel do Windows${uac()}...`, 'step');
     await tunnelOffSteps(distro);
   });
 }

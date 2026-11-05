@@ -11,13 +11,15 @@ import {
   disconnect,
   forgetTotpKey,
   refreshStatus,
+  watching,
   saveTotp,
   tunnelOff,
 } from './panel.ts';
 import { paths } from './paths.ts';
-import { emptyTunnel, getSettings, mutate, newId, readData, type Connection } from './store.ts';
+import { checkGatewayService, startGatewayService } from './elevated.ts';
+import { defaultPrefs, emptyTunnel, getPrefs, getSettings, mutate, newId, readData, type Connection } from './store.ts';
 import { parseTotpSecret, totpNow } from './totp.ts';
-import { badRequest, HttpError, optionalSecret, parseConnection, parseSecret, parseSettings, parseTunnel } from './validation.ts';
+import { badRequest, HttpError, optionalSecret, parseConnection, parsePrefs, parseSecret, parseSettings, parseTunnel } from './validation.ts';
 import {
   forgetSecrets,
   helperVersion,
@@ -44,6 +46,7 @@ async function publicData() {
   const has = (kind: SecretKind, id: string) => names.has(secretName(kind, id));
   return {
     settings: data.settings,
+    prefs: data.prefs ?? defaultPrefs(),
     connections: data.connections.map((c) => ({ ...c, hasPassword: has('VPN_PASSWORD', c.id), hasTotp: has('TOTP_SECRET', c.id) })),
     /** False until the Ubuntu commands are updated: secrets can't be read or saved yet. */
     vaultReady,
@@ -111,6 +114,21 @@ export function createApp() {
     });
     dataChanged();
     res.json(settings);
+  });
+
+  app.put('/api/prefs', async (req, res) => {
+    const prefs = parsePrefs(body(req));
+    await mutate((data) => {
+      data.prefs = prefs;
+    });
+    dataChanged();
+    // Turned on: ask now rather than at the next start.
+    if (prefs.elevateOnStart && !state.elevated) void startGatewayService();
+    res.json(prefs);
+  });
+
+  app.post('/api/elevate', async (_req, res) => {
+    res.json({ elevated: await startGatewayService() });
   });
 
   app.get('/api/system', async (_req, res) => {
@@ -256,10 +274,14 @@ const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   res.status(status).json({ error: error.message ?? 'Erro inesperado' });
 };
 
-/** Polls the VPN state every few seconds while someone is watching (the window is open). */
+/**
+ * Polls the VPN state every few seconds while someone is watching (the window is open), or while
+ * a connection is wanted up, so a drop is noticed (and reconnected) with the window closed too.
+ */
 function startPolling(): void {
   setInterval(() => {
-    if (listenerCount() > 0) void refreshStatus();
+    if (listenerCount() > 0 || watching()) void refreshStatus();
+    void checkGatewayService();
   }, 4000);
 }
 
@@ -272,10 +294,15 @@ async function initialize(): Promise<void> {
   void finishPendingMigration();
 }
 
-/** Starts the API (and the built UI, when present) on 127.0.0.1. Port 0 picks a free port. */
-export async function startServer(port: number): Promise<{ port: number; close: () => void }> {
+/**
+ * Starts the API (and the built UI, when present) on 127.0.0.1. Port 0 picks a free port. The
+ * desktop app passes elevate, to ask for administrator once now (Preferências) instead of at
+ * every tunnel change.
+ */
+export async function startServer(port: number, { elevate = false } = {}): Promise<{ port: number; close: () => void }> {
   await initialize();
   startPolling();
+  if (elevate && process.platform === 'win32' && (await getPrefs()).elevateOnStart) void startGatewayService();
   return new Promise((resolve, reject) => {
     const server = createApp().listen(port, '127.0.0.1', (error?: Error) => {
       if (error) return reject(error);

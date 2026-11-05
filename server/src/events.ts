@@ -30,6 +30,10 @@ export interface PanelState {
   busy: string | null;
   /** Signature of the tunnel last applied by the app (see tunnelSignature), to spot pending edits. */
   appliedTunnel: string | null;
+  /** The elevated helper is up: tunnel changes don't ask for the UAC (elevated.ts). */
+  elevated: boolean;
+  /** Connection to bring back after the VPN dropped (auto reconnect), and when the next try is. */
+  reconnect: { connectionId: string; name: string; attempt: number; nextAt: string } | null;
 }
 
 type Listener = (event: 'state' | 'log' | 'data', data: unknown) => void;
@@ -52,6 +56,8 @@ export const state: PanelState = {
   },
   busy: null,
   appliedTunnel: null,
+  elevated: false,
+  reconnect: null,
 };
 
 function classify(text: string): LogLevel {

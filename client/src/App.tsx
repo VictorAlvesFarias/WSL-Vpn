@@ -1,4 +1,4 @@
-import { Download, Globe, Loader, Power, ShieldCheck, ShieldOff, Unplug, Waypoints } from 'lucide-react';
+import { Download, Globe, Loader, Power, RefreshCw, Settings, ShieldCheck, ShieldOff, Unplug, Waypoints } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { CommandPalette, type Command } from './components/CommandPalette';
@@ -6,6 +6,7 @@ import { ConnectionForm } from './components/ConnectionForm';
 import { ConnectionsPage, connectTo } from './components/ConnectionsPage';
 import { InstallPage } from './components/InstallPage';
 import { ActivityBar, type Activity } from './components/layout/ActivityBar';
+import { PrefsDialog } from './components/PrefsDialog';
 import { StatusBar, StatusItem, StatusSpacer } from './components/layout/StatusBar';
 import { TitleBar, type Menu } from './components/layout/TitleBar';
 import { AboutDialog, Banner, Toasts, useShortcuts, useToasts } from './components/Shell';
@@ -17,7 +18,7 @@ import type { AppData, Connection, SystemInfo } from './types';
 import { useServerEvents } from './useServerEvents';
 
 type Tab = 'panel' | 'install';
-type Dialog = { kind: 'connection'; connection: Connection | null } | { kind: 'totp'; connection: Connection };
+type Dialog = { kind: 'connection'; connection: Connection | null } | { kind: 'totp'; connection: Connection } | { kind: 'prefs' };
 
 const labels: Record<Tab, string> = { panel: 'Conexões', install: 'Instalação' };
 
@@ -115,11 +116,21 @@ export function App() {
   const menus: Menu[] = [
     {
       label: 'Arquivo',
-      items: [{ label: 'Nova conexão', shortcut: 'Ctrl+N', keywords: 'criar vpn', onSelect: () => setDialog({ kind: 'connection', connection: null }) }],
+      items: [
+        { label: 'Nova conexão', shortcut: 'Ctrl+N', keywords: 'criar vpn', onSelect: () => setDialog({ kind: 'connection', connection: null }) },
+        null,
+        { label: 'Preferências', shortcut: 'Ctrl+,', keywords: 'reconectar administrador uac elevação', disabled: !data, onSelect: () => setDialog({ kind: 'prefs' }) },
+      ],
     },
     {
       label: 'VPN',
       items: [
+        {
+          label: 'Cancelar a reconexão',
+          disabled: !state?.reconnect,
+          keywords: 'parar tentar',
+          onSelect: () => void disconnect(),
+        },
         { label: 'Desconectar', disabled: !status?.up || Boolean(busy), keywords: 'sair desligar', onSelect: () => void disconnect() },
         { label: 'Limpar túnel do Windows', disabled: status?.tunnel === 'off' || Boolean(busy), keywords: 'rotas dns', onSelect: () => void api.tunnelOff().catch((e: Error) => notifyError(e.message)) },
         null,
@@ -184,6 +195,7 @@ export function App() {
     'ctrl+1': () => openConnection(null),
     'ctrl+2': () => setTab('install'),
     'ctrl+n': () => setDialog({ kind: 'connection', connection: null }),
+    'ctrl+,': () => data && setDialog({ kind: 'prefs' }),
   });
 
   const statusTone = !connected ? 'danger' : busy ? 'warn' : 'accent';
@@ -200,7 +212,12 @@ export function App() {
         />
 
         <div className="flex min-h-0 flex-1">
-          <ActivityBar current={tab} items={activities} onNavigate={(id) => (id === 'panel' ? openConnection(null) : setTab(id))} />
+          <ActivityBar
+            current={tab}
+            items={activities}
+            bottom={[{ id: 'prefs' as Tab, label: 'Preferências', icon: Settings, shortcut: 'Ctrl+,' }]}
+            onNavigate={(id) => ((id as string) === 'prefs' ? data && setDialog({ kind: 'prefs' }) : id === 'panel' ? openConnection(null) : setTab(id))}
+          />
 
           <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
             {(!connected || (needsInstall && tab !== 'install') || outdated) && (
@@ -271,6 +288,13 @@ export function App() {
                     {status.address}
                   </StatusItem>
                 )}
+                {state?.reconnect && !busy && (
+                  <StatusItem tip="A VPN caiu e o app vai reconectar sozinho. VPN › Cancelar a reconexão para parar." onClick={() => openConnection(state.reconnect?.connectionId ?? null)} className="bg-warn text-black hover:bg-warn">
+                    <RefreshCw className="animate-spin" />
+                    Reconectando {state.reconnect.name}
+                    {state.reconnect.attempt > 0 && ` (tentativa ${state.reconnect.attempt + 1})`}
+                  </StatusItem>
+                )}
                 {busy && (
                   <StatusItem tip="Tarefa em andamento">
                     <Loader className="animate-spin" />
@@ -278,6 +302,14 @@ export function App() {
                   </StatusItem>
                 )}
                 <StatusSpacer />
+                <StatusItem
+                  tip={state?.elevated ? 'Administrador concedido: o túnel do Windows não pede o UAC enquanto o app estiver aberto' : 'Cada mudança no túnel do Windows pede o UAC (Preferências)'}
+                  onClick={() => data && setDialog({ kind: 'prefs' })}
+                  className="max-md:hidden"
+                >
+                  <ShieldCheck className={state?.elevated ? undefined : 'opacity-50'} />
+                  {state?.elevated ? 'Admin' : 'Sem admin'}
+                </StatusItem>
                 <StatusItem
                   tip="O que o Windows manda pela VPN"
                   onClick={() => openConnection(active?.id ?? openId)}
@@ -309,6 +341,15 @@ export function App() {
             notify('ok', `Conexão "${connection.name}" salva`);
             loadData();
           }}
+        />
+      )}
+      {dialog?.kind === 'prefs' && data && (
+        <PrefsDialog
+          prefs={data.prefs}
+          elevated={Boolean(state?.elevated)}
+          onClose={() => setDialog(null)}
+          onSaved={loadData}
+          onError={notifyError}
         />
       )}
       {dialog?.kind === 'totp' && (
